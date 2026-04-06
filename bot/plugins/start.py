@@ -5,7 +5,7 @@ from pyrogram.enums import ChatType
 from bot.database.db import add_user, add_group
 from bot.config import SUPPORT_GROUP, UPDATE_CHANNEL
 
-START_PIC = os.path.join(os.path.dirname(__file__), "..", "utils", "start_img.png")
+START_PIC = "https://ibb.co/DHpGmZv1"
 
 @Client.on_message(filters.command(["start"]))
 async def start_command(client: Client, message: Message):
@@ -29,9 +29,9 @@ async def start_command(client: Client, message: Message):
              InlineKeyboardButton("📢 Channel", url=UPDATE_CHANNEL)]
         ])
         
-        if os.path.exists(START_PIC):
+        try:
             await message.reply_photo(photo=START_PIC, caption=text, reply_markup=markup)
-        else:
+        except Exception:
             await message.reply_text(text, reply_markup=markup)
     else:
         await add_group(message.chat.id, message.chat.title)
@@ -53,7 +53,10 @@ async def help_command(client: Client, message: Message):
         [InlineKeyboardButton("💬 Need Help?", url=SUPPORT_GROUP)]
     ])
     
-    if message.chat.type == ChatType.PRIVATE and os.path.exists(START_PIC):
-        await message.reply_photo(photo=START_PIC, caption=text, reply_markup=markup)
+    if message.chat.type == ChatType.PRIVATE:
+        try:
+            await message.reply_photo(photo=START_PIC, caption=text, reply_markup=markup)
+        except Exception:
+            await message.reply_text(text, reply_markup=markup)
     else:
         await message.reply_text(text, reply_markup=markup)
