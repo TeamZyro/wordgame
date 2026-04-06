@@ -104,7 +104,7 @@ async def execute_round(client: Client, chat_id: int, status_message=None):
         "words": words_dict,
         "found_words": [],
         "solved": False,
-        "start_time": time.time(),
+        "start_time": 0, # Will be set precisely after image delivery
         "time_limit": time_limit,
         "theme": theme_name
     }
@@ -120,6 +120,8 @@ async def execute_round(client: Client, chat_id: int, status_message=None):
         caption=caption_text
     )
     
+    # Start timer exactly when message lands in chat
+    game_data["start_time"] = time.time()
     game_data["message_id"] = msg.id
     active_games[chat_id] = game_data
 
