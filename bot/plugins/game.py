@@ -1,9 +1,9 @@
 import time
 import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import Message, InputMediaPhoto
+from pyrogram.types import Message, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from bot.utils.image_gen import create_new_game_state, render_grid_image
-from bot.database.db import add_score, get_top_users
+from bot.database.db import add_score, get_top_users, add_group_score, get_top_groups
 
 active_games = {}
 group_rounds = {} # Stores current level per chat
@@ -31,6 +31,32 @@ def get_caption(game_data):
             text += f"💡 `{hint}` ({len(actual_word)}L)\n"
             
     return text
+
+async def game_timeout_monitor(client: Client, chat_id: int, round_num: int, duration: float):
+    await asyncio.sleep(duration)
+    if chat_id in active_games:
+        game = active_games[chat_id]
+        if game["round"] == round_num and not game["solved"]:
+            game["solved"] = True
+            group_rounds[chat_id] = 1
+            try:
+                text = f"⏰ **Round {round_num} — TIME UP**\n"
+                text += "❌ Game timed out! Progress reset to Round 1."
+                await client.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=game["message_id"],
+                    caption=text
+                )
+            except Exception as e:
+                print(f"Error editing caption on timeout: {e}")
+            
+            try:
+                await client.send_message(
+                    chat_id,
+                    f"⏰ **TIME UP!**\nYou failed Round {round_num}. Progress has been reset to Round 1.\nType /game to restart from the beginning."
+                )
+            except Exception as e:
+                print(f"Error sending timeout message: {e}")
 
 async def execute_round(client: Client, chat_id: int, status_message=None):
     round_num = group_rounds.get(chat_id, 1)
@@ -84,7 +110,7 @@ async def execute_round(client: Client, chat_id: int, status_message=None):
         except:
             pass
         
-    grid, words_info, theme_name = create_new_game_state(word_count)
+    grid, words_info, theme_name = create_new_game_state(word_count, round_num=round_num)
     if not words_info:
         await status_message.edit_text("❌ Failed to build a puzzle. The round size might be too large.")
         return
@@ -124,6 +150,7 @@ async def execute_round(client: Client, chat_id: int, status_message=None):
     game_data["start_time"] = time.time()
     game_data["message_id"] = msg.id
     active_games[chat_id] = game_data
+    asyncio.create_task(game_timeout_monitor(client, chat_id, round_num, time_limit))
 
 @Client.on_message(filters.command(["game", "stopgame"]))
 async def game_commands(client: Client, message: Message):
@@ -191,6 +218,7 @@ async def check_answer(client: Client, message: Message):
                 points = base_points + round_bonus
                 
                 await add_score(message.from_user.id, message.from_user.first_name, points)
+                await add_group_score(chat_id, message.chat.title, points)
                 
                 all_found = all(info["found_by"] is not None for info in game["words"].values())
                 if all_found:
@@ -223,16 +251,71 @@ async def check_answer(client: Client, message: Message):
 @Client.on_message(filters.command(["leaderboard"]))
 async def leaderboard(client: Client, message: Message):
     top_users = await get_top_users(10)
+    text = "🏆 **Global Users Leaderboard** 🏆\n\n"
     if not top_users:
-        await message.reply_text("No one has played yet!")
-        return
-    text = "🏆 **Global Leaderboard** 🏆\n\n"
-    for i, u in enumerate(top_users):
-        name = u.get('first_name', 'Unknown')
-        score = u.get('score', 0)
-        user_id = u.get('user_id', 0)
+        text += "No users have played yet!"
+    else:
+        for i, u in enumerate(top_users):
+            name = u.get('first_name', 'Unknown')
+            score = u.get('score', 0)
+            user_id = u.get('user_id', 0)
+            text += f"**{i+1}.** [{name}](tg://user?id={user_id}) - `{score}` points\n"
+            
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👤 Users (Active)", callback_data="leaderboard_users"),
+            InlineKeyboardButton("👥 Groups", callback_data="leaderboard_groups")
+        ]
+    ])
+    await message.reply_text(text, reply_markup=markup)
+
+@Client.on_callback_query(filters.regex("^leaderboard_"))
+async def leaderboard_callback(client: Client, query: CallbackQuery):
+    data = query.data
+    
+    if data == "leaderboard_users":
+        top_users = await get_top_users(10)
+        text = "🏆 **Global Users Leaderboard** 🏆\n\n"
+        if not top_users:
+            text += "No users have played yet!"
+        else:
+            for i, u in enumerate(top_users):
+                name = u.get('first_name', 'Unknown')
+                score = u.get('score', 0)
+                user_id = u.get('user_id', 0)
+                text += f"**{i+1}.** [{name}](tg://user?id={user_id}) - `{score}` points\n"
         
-        # Link name to user profile explicitly via tg:// protocol
-        text += f"**{i+1}.** [{name}](tg://user?id={user_id}) - `{score}` points\n"
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👤 Users (Active)", callback_data="leaderboard_users"),
+                InlineKeyboardButton("👥 Groups", callback_data="leaderboard_groups")
+            ]
+        ])
         
-    await message.reply_text(text)
+        try:
+            await query.message.edit_text(text, reply_markup=markup)
+        except Exception:
+            await query.answer()
+            
+    elif data == "leaderboard_groups":
+        top_groups = await get_top_groups(10)
+        text = "🏆 **Global Groups Leaderboard** 🏆\n\n"
+        if not top_groups:
+            text += "No groups have played yet!"
+        else:
+            for i, g in enumerate(top_groups):
+                title = g.get('title', 'Unknown Group')
+                score = g.get('score', 0)
+                text += f"**{i+1}.** {title} - `{score}` points\n"
+                
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👤 Users", callback_data="leaderboard_users"),
+                InlineKeyboardButton("👥 Groups (Active)", callback_data="leaderboard_groups")
+            ]
+        ])
+        
+        try:
+            await query.message.edit_text(text, reply_markup=markup)
+        except Exception:
+            await query.answer()

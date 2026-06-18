@@ -142,7 +142,7 @@ def place_word(word_to_place, grid, size, force_type="any"):
                 
     return None
 
-def create_new_game_state(word_count=3):
+def create_new_game_state(word_count=3, round_num=1):
     if word_count <= 3:
         size = 4
     elif word_count <= 5:
@@ -154,13 +154,30 @@ def create_new_game_state(word_count=3):
     else:
         size = 10
         
-    grid = [['' for _ in range(size)] for _ in range(size)]
-    words_info = {}
-    
-    valid_words = [w for w in WORD_LIST if len(w) <= size]
-    actual_count = min(word_count, len(valid_words))
-    target_words = random.sample(valid_words, actual_count)
-    
+    # Scale word lengths based on round difficulty
+    if round_num <= 2:
+        min_len, max_len = 3, 4
+    elif round_num <= 5:
+        min_len, max_len = 4, 5
+    elif round_num <= 10:
+        min_len, max_len = 4, 6
+    elif round_num <= 20:
+        min_len, max_len = 5, 6
+    elif round_num <= 35:
+        min_len, max_len = 5, 8
+    else:
+        min_len, max_len = 6, 8
+
+    # Bound lengths by grid size limit
+    min_len = min(min_len, size)
+    max_len = min(max_len, size)
+    if min_len > max_len:
+        min_len = max_len
+
+    valid_words = [w for w in WORD_LIST if min_len <= len(w) <= max_len]
+    if len(valid_words) < word_count:
+        valid_words = [w for w in WORD_LIST if len(w) <= size]
+
     UNIQUE_PALETTE = [
         ((250, 80, 80), (150, 40, 40)),   # Red
         ((80, 250, 80), (40, 150, 40)),   # Green
@@ -171,28 +188,41 @@ def create_new_game_state(word_count=3):
         ((250, 130, 50), (150, 70, 20)),  # Orange
         ((150, 50, 250), (80, 20, 150))   # Purple
     ]
-    random.shuffle(UNIQUE_PALETTE)
-    
-    # We guarantee a mixture of Plus (vertical/horizontal) and Cross (diagonals)
-    mixture = ["cross", "plus", "cross", "plus", "any", "any", "any", "any"]
-    random.shuffle(mixture)
-    
-    for idx, word in enumerate(target_words):
-        force_type = mixture[idx % len(mixture)]
-        
-        # Try finding a place using the mixed pattern
-        positions = place_word(word, grid, size, force_type)
-        if not positions:
-            # Fallback if forced requirement couldn't be met
-            positions = place_word(word, grid, size, "any")
-            
-        if positions:
-            col_idx = idx % len(UNIQUE_PALETTE)
-            words_info[word] = {
-                "positions": positions,
-                "color": UNIQUE_PALETTE[col_idx][0],
-                "shadow": UNIQUE_PALETTE[col_idx][1]
-            }
+
+    grid = []
+    words_info = {}
+
+    # Try up to 10 times to successfully place all target words
+    for attempt in range(10):
+        grid = [['' for _ in range(size)] for _ in range(size)]
+        words_info = {}
+        actual_count = min(word_count, len(valid_words))
+        target_words = random.sample(valid_words, actual_count)
+
+        random.shuffle(UNIQUE_PALETTE)
+        mixture = ["cross", "plus", "cross", "plus", "any", "any", "any", "any"]
+        random.shuffle(mixture)
+
+        placed_all = True
+        for idx, word in enumerate(target_words):
+            force_type = mixture[idx % len(mixture)]
+            positions = place_word(word, grid, size, force_type)
+            if not positions:
+                positions = place_word(word, grid, size, "any")
+
+            if positions:
+                col_idx = idx % len(UNIQUE_PALETTE)
+                words_info[word] = {
+                    "positions": positions,
+                    "color": UNIQUE_PALETTE[col_idx][0],
+                    "shadow": UNIQUE_PALETTE[col_idx][1]
+                }
+            else:
+                placed_all = False
+                break
+
+        if placed_all:
+            break
 
     # Fill remaining blanks
     for r in range(size):

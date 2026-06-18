@@ -53,3 +53,18 @@ async def get_all_users():
 async def get_all_groups():
     cursor = groups_collection.find({}, {'chat_id': 1})
     return await cursor.to_list(length=None)
+
+async def add_group_score(chat_id: int, title: str, points: int):
+    await groups_collection.update_one(
+        {'chat_id': chat_id},
+        {
+            '$inc': {'score': points, 'games_played': 1},
+            '$set': {'title': title}
+        },
+        upsert=True
+    )
+
+async def get_top_groups(limit: int = 10):
+    cursor = groups_collection.find().sort('score', -1).limit(limit)
+    return await cursor.to_list(length=limit)
+
