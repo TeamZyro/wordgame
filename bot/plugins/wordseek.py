@@ -181,7 +181,35 @@ async def _start_wordseek_game(
     )
 
 
-@Client.on_message(filters.command(["wordseek", "new", "new4", "new5", "new6"]))
+async def _wordseek_start_command_filter(_, client: Client, message: Message):
+    """Match start commands with or without this bot's @username suffix."""
+    text = message.text or message.caption
+    if not text:
+        return False
+
+    parts = text.split()
+    if not parts or not parts[0].startswith("/"):
+        return False
+
+    command = parts[0][1:]
+    if "@" in command:
+        command, mentioned_username = command.split("@", 1)
+        me = getattr(client, "me", None)
+        if me is None:
+            me = await client.get_me()
+        if not me.username or mentioned_username.casefold() != me.username.casefold():
+            return False
+
+    command = command.casefold()
+    if command not in {"wordseek", "new", "new4", "new5", "new6"}:
+        return False
+
+    # Keep the same parsed format used by the existing game-start logic.
+    message.command = [command, *parts[1:]]
+    return True
+
+
+@Client.on_message(filters.create(_wordseek_start_command_filter))
 async def wordseek_start_commands(client: Client, message: Message):
     cmd = message.command[0].lower()
     forced = None
