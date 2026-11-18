@@ -2,159 +2,296 @@ import os
 import json
 import random
 import string
-import urllib.request
+import logging
+from functools import lru_cache
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
+from bot.utils.views import format_hint_pattern
+
+logger = logging.getLogger("WordGridBot.ImageGen")
 
 WORDS_JSON_PATH = os.path.join(os.path.dirname(__file__), "words.json")
+FONT_PATH = os.path.join(os.path.dirname(__file__), "GameFont.ttf")
 
-def download_words_if_missing():
-    if not os.path.exists(WORDS_JSON_PATH):
-        print("Downloading common vocabulary library...")
-        try:
-            url = "https://raw.githubusercontent.com/first20hours/google-10000-english/master/google-10000-english-no-swears.txt"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            response = urllib.request.urlopen(req)
-            text = response.read().decode('utf-8')
-            words = text.split('\n')
-            
-            valid = [w.strip().upper() for w in words if 3 <= len(w.strip()) <= 8]
-            selected = valid[:2500] # Grabs 2500 most common English words
-            
-            with open(WORDS_JSON_PATH, "w", encoding="utf-8") as f:
-                json.dump(selected, f, indent=4)
-        except Exception as e:
-            print("Failed to build words.json:", e)
+# Built-in fallback words if words.json is ever missing
+DEFAULT_WORDS = [
+    "CAT", "DOG", "SUN", "SKY", "SEA", "ICE", "GEM", "KEY", "MAP", "OWL", "FOX",
+    "BEAR", "LION", "WOLF", "HAWK", "STAR", "MOON", "FIRE", "WIND", "RAIN", "SNOW",
+    "GOLD", "JADE", "RUBY", "OPAL", "TREE", "LEAF", "ROSE", "LAKE", "REEF", "WAVE",
+    "SHIP", "BOOK", "HARP", "DRUM", "GAME", "MAZE", "CLUE", "HERO", "KING", "MAGE",
+    "APPLE", "TIGER", "WATER", "EAGLE", "SHARK", "WHALE", "PANDA", "KOALA", "ZEBRA",
+    "FLAME", "STORM", "CLOUD", "FROST", "OCEAN", "RIVER", "SWORD", "ARMOR", "CROWN",
+    "JEWEL", "PEARL", "CORAL", "AMBER", "TOPAZ", "PIANO", "FLUTE", "MAGIC", "QUEST",
+    "PLANET", "GALAXY", "NEBULA", "ROCKET", "COMET", "METEOR", "DRAGON", "KNIGHT",
+    "CASTLE", "SHIELD", "FALCON", "PYTHON", "JUNGLE", "FOREST", "DESERT", "CANYON",
+    "ISLAND", "VALLEY", "BRIDGE", "TEMPLE", "PALACE", "TROPHY", "LEGEND", "ARCADE",
+    "PUZZLE", "RIDDLE", "CIPHER", "VORTEX", "MATRIX", "CRYSTAL", "EMERALD", "DIAMOND",
+    "THUNDER", "VOLCANO", "GLACIER", "RAINBOW", "SUNRISE", "PHOENIX", "GRIFFIN",
+    "DOLPHIN", "PENGUIN", "PANTHER", "LEOPARD", "CHEETAH", "OCTOPUS", "COMPASS",
+    "LANTERN", "HARVEST", "JOURNEY", "VICTORY", "CHAMPION", "TREASURE", "SAPPHIRE",
+]
 
-download_words_if_missing()
+# Strictly exclude obscure web-log acronyms/tokens even if an old words.json is loaded
+BLOCKED_TOKENS = {
+    "JAN", "FEB", "MAR", "APR", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN", "DVD", "USA", "NON", "SAN",
+    "FAX", "RSS", "FAQ", "URL", "EUR", "PDF", "USR", "COM", "PRE", "LTD", "LOS",
+    "INC", "TEL", "EST", "III", "GMT", "XML", "INT", "USB", "PHP", "ETC", "MSN",
+    "LAS", "MIN", "PST", "TOM", "BOB", "DEV", "VOL", "LEE", "WWW", "LLC", "SEC",
+    "IBM", "JIM", "DEL", "JOE", "CDS", "CVS", "DES", "LCD", "AVE", "PIC", "VHS",
+    "CON", "UPS", "VAR", "DOC", "USD", "LES", "ANN", "DAN", "BBC", "AVG", "ROM",
+    "SRC", "HIV", "PDA", "DSL", "ZUM", "DNA", "TIM", "SQL", "DON", "GPS", "ACC",
+    "GNU", "BEN", "AOL", "LIB", "UTC", "DER", "PER", "VIA", "PRO", "MAX", "ADS",
+    "GAY", "DIE", "SEX", "ASS", "XXX", "VIRGIN", "PORN", "NUDE", "EBAY", "PERL",
+    "HTML", "HTTP", "JPEG", "MPEG", "ISBN", "ISSN", "PMID",
+}
 
-def get_word_list():
+
+def load_word_list() -> list[str]:
     try:
-        with open(WORDS_JSON_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return ["APPLE", "TIGER", "WATER", "LION", "BEAR", "SYSTEM"]
+        if os.path.exists(WORDS_JSON_PATH):
+            with open(WORDS_JSON_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            cleaned = sorted(
+                {
+                    str(w).strip().upper()
+                    for w in raw
+                    if str(w).strip().isalpha()
+                    and 3 <= len(str(w).strip()) <= 8
+                    and str(w).strip().upper() not in BLOCKED_TOKENS
+                },
+                key=lambda x: (len(x), x),
+            )
+            if len(cleaned) >= 100:
+                return cleaned
+    except Exception as e:
+        logger.warning("Failed to load words.json, using fallback bank: %s", e)
+    return DEFAULT_WORDS[:]
 
-WORD_LIST = get_word_list()
+
+WORD_LIST = load_word_list()
+
+# Pre-index words by length for O(1) round filtering
+WORDS_BY_LEN: dict[int, list[str]] = {}
+for _w in WORD_LIST:
+    WORDS_BY_LEN.setdefault(len(_w), []).append(_w)
 
 THEMES = {
     "emerald": {
-        "bg": (13, 26, 18),
-        "board_glow": (50, 180, 100),
-        "top_text": (138, 240, 150),
-        "cell_fill": (20, 60, 35),
-        "cell_shadow": (8, 25, 14),
-        "text_col": (190, 255, 190)
+        "bg": (11, 24, 17),
+        "header_bg": (16, 38, 26),
+        "board_glow": (52, 211, 153),
+        "top_text": (167, 243, 208),
+        "cell_fill": (20, 58, 38),
+        "cell_shadow": (7, 22, 13),
+        "text_col": (220, 252, 231),
     },
     "ocean": {
-        "bg": (10, 18, 30),
-        "board_glow": (60, 120, 220),
-        "top_text": (150, 200, 255),
-        "cell_fill": (25, 55, 95),
-        "cell_shadow": (10, 22, 45),
-        "text_col": (190, 230, 255)
+        "bg": (10, 19, 34),
+        "header_bg": (15, 30, 54),
+        "board_glow": (56, 189, 248),
+        "top_text": (186, 230, 253),
+        "cell_fill": (22, 54, 94),
+        "cell_shadow": (8, 20, 40),
+        "text_col": (224, 242, 254),
     },
     "sunset": {
-        "bg": (30, 15, 15),
-        "board_glow": (220, 100, 50),
-        "top_text": (255, 180, 120),
-        "cell_fill": (90, 40, 30),
-        "cell_shadow": (40, 15, 10),
-        "text_col": (255, 210, 190)
+        "bg": (32, 14, 18),
+        "header_bg": (48, 20, 26),
+        "board_glow": (251, 146, 60),
+        "top_text": (254, 215, 170),
+        "cell_fill": (88, 38, 32),
+        "cell_shadow": (38, 14, 10),
+        "text_col": (255, 237, 213),
     },
     "royal": {
-        "bg": (20, 10, 25),
-        "board_glow": (140, 60, 200),
-        "top_text": (220, 150, 255),
-        "cell_fill": (65, 30, 90),
-        "cell_shadow": (25, 10, 35),
-        "text_col": (230, 180, 255)
+        "bg": (20, 12, 32),
+        "header_bg": (32, 18, 52),
+        "board_glow": (192, 132, 252),
+        "top_text": (233, 213, 255),
+        "cell_fill": (62, 30, 96),
+        "cell_shadow": (24, 10, 40),
+        "text_col": (243, 232, 255),
     },
     "crimson": {
-        "bg": (25, 10, 10),
-        "board_glow": (200, 50, 60),
-        "top_text": (255, 150, 150),
-        "cell_fill": (85, 25, 30),
-        "cell_shadow": (40, 8, 12),
-        "text_col": (255, 190, 190)
-    }
+        "bg": (28, 10, 16),
+        "header_bg": (44, 16, 24),
+        "board_glow": (244, 63, 94),
+        "top_text": (254, 205, 211),
+        "cell_fill": (84, 24, 38),
+        "cell_shadow": (36, 8, 14),
+        "text_col": (255, 228, 230),
+    },
+    "cyber": {
+        "bg": (12, 14, 28),
+        "header_bg": (20, 24, 48),
+        "board_glow": (45, 212, 191),
+        "top_text": (153, 246, 228),
+        "cell_fill": (28, 36, 74),
+        "cell_shadow": (10, 14, 34),
+        "text_col": (204, 251, 241),
+    },
+    "gold": {
+        "bg": (26, 20, 10),
+        "header_bg": (42, 32, 14),
+        "board_glow": (250, 204, 21),
+        "top_text": (254, 240, 138),
+        "cell_fill": (78, 58, 22),
+        "cell_shadow": (32, 22, 8),
+        "text_col": (254, 249, 195),
+    },
+    "arctic": {
+        "bg": (14, 24, 34),
+        "header_bg": (22, 38, 52),
+        "board_glow": (125, 211, 252),
+        "top_text": (224, 242, 254),
+        "cell_fill": (32, 62, 84),
+        "cell_shadow": (12, 26, 38),
+        "text_col": (240, 249, 255),
+    },
 }
 
-FONT_PATH = os.path.join(os.path.dirname(__file__), "GameFont.ttf")
+FOUND_PALETTE = [
+    ((239, 68, 68), (145, 28, 28)),     # Vibrant Red
+    ((34, 197, 94), (18, 115, 52)),     # Emerald Green
+    ((59, 130, 246), (26, 72, 155)),    # Royal Blue
+    ((217, 70, 239), (126, 28, 145)),   # Neon Magenta
+    ((234, 179, 8), (140, 102, 4)),     # Golden Amber
+    ((6, 182, 212), (8, 105, 126)),     # Cyan Glow
+    ((249, 115, 22), (154, 58, 10)),    # Tangerine Orange
+    ((139, 92, 246), (78, 42, 158)),    # Electric Violet
+    ((236, 72, 153), (142, 30, 88)),    # Hot Pink
+    ((20, 184, 166), (12, 108, 96)),    # Teal Mint
+    ((132, 204, 22), (74, 120, 10)),    # Lime Zest
+    ((99, 102, 241), (48, 50, 150)),    # Indigo Pulse
+    ((244, 63, 94), (148, 24, 48)),     # Rose Crimson
+    ((14, 165, 233), (8, 95, 140)),     # Sky Azure
+]
 
-def download_font_if_missing():
-    if not os.path.exists(FONT_PATH):
-        print("Downloading modern Game Font...")
-        try:
-            url = "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Bold.ttf"
-            urllib.request.urlretrieve(url, FONT_PATH)
-        except Exception as e:
-            print("Failed to download font:", e)
+
+@lru_cache(maxsize=16)
+def get_cached_font(size: int):
+    try:
+        if os.path.exists(FONT_PATH):
+            return ImageFont.truetype(FONT_PATH, size)
+    except Exception as e:
+        logger.warning("Could not load GameFont.ttf at size %s: %s", size, e)
+    return ImageFont.load_default()
 
 
-def place_word(word_to_place, grid, size, force_type="any"):
+def _text_metrics(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int, int]:
+    if hasattr(font, "getbbox"):
+        bbox = font.getbbox(text)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1], bbox[1]
+    w, h = draw.textsize(text, font=font)
+    return w, h, 0
+
+
+def create_single_hint(word: str, revealed_indices: set[int] | None = None) -> str:
+    return format_hint_pattern(word, revealed_indices)
+
+
+def place_word(word_to_place: str, grid: list[list[str]], size: int, force_type: str = "any"):
     """
-    Tries to place a word thoroughly in the grid by evaluating specific types of directions.
-    Supports deep intersection and cross overlaps.
+    Places `word_to_place` in `grid`, preferring valid character intersections
+    to build tight, engaging crossword-style overlaps.
     """
     all_directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
-    
     if force_type == "cross":
         directions = [(1, 1), (1, -1)]
     elif force_type == "plus":
         directions = [(0, 1), (1, 0)]
     else:
         directions = all_directions[:]
-        
+
     random.shuffle(directions)
-    
+    wlen = len(word_to_place)
+
+    best_candidate = None
+    best_overlap = -1
+
     for dr, dc in directions:
-        # Retrieve all valid starting positions for this direction mathematically 
-        # so we don't 'give up' randomly if the grid is tight.
         valid_starts = []
         for r in range(size):
             for c in range(size):
-                end_r = r + (len(word_to_place) - 1) * dr
-                end_c = c + (len(word_to_place) - 1) * dc
+                end_r = r + (wlen - 1) * dr
+                end_c = c + (wlen - 1) * dc
                 if 0 <= end_r < size and 0 <= end_c < size:
                     valid_starts.append((r, c))
-                        
+
         random.shuffle(valid_starts)
-        
+
         for row, col in valid_starts:
+            overlap = 0
             can_place = True
             for i, letter in enumerate(word_to_place):
                 curr_r = row + i * dr
                 curr_c = col + i * dc
-                # Check intersection natively - allowed to overlap deeply!
-                if grid[curr_r][curr_c] != '' and grid[curr_r][curr_c] != letter:
+                existing = grid[curr_r][curr_c]
+                if existing != "" and existing != letter:
                     can_place = False
                     break
-                    
-            if can_place:
-                positions = []
-                for i, letter in enumerate(word_to_place):
-                    curr_r = row + i * dr
-                    curr_c = col + i * dc
-                    grid[curr_r][curr_c] = letter
-                    positions.append((curr_r, curr_c))
-                return positions
-                
-    return None
+                if existing == letter:
+                    overlap += 1
 
-def create_new_game_state(word_count=3, round_num=1):
-    if word_count <= 3:
-        size = 4
-    elif word_count <= 5:
+            # Avoid completely overlapping an identical segment
+            if can_place and overlap < wlen:
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_candidate = (row, col, dr, dc)
+                    if overlap >= 1:
+                        break
+        if best_overlap >= 1 and best_candidate is not None:
+            break
+
+    if best_candidate is None:
+        return None
+
+    row, col, dr, dc = best_candidate
+    positions = []
+    for i, letter in enumerate(word_to_place):
+        curr_r = row + i * dr
+        curr_c = col + i * dc
+        grid[curr_r][curr_c] = letter
+        positions.append((curr_r, curr_c))
+    return positions
+
+
+def _select_non_substring_words(pool: list[str], count: int) -> list[str]:
+    """Selects `count` unique words ensuring no chosen word is a substring of another."""
+    candidates = random.sample(pool, min(len(pool), count * 4))
+    selected: list[str] = []
+    for w in candidates:
+        if any(w in other or other in w for other in selected):
+            continue
+        selected.append(w)
+        if len(selected) == count:
+            break
+    if len(selected) < count:
+        for w in candidates:
+            if w not in selected:
+                selected.append(w)
+                if len(selected) == count:
+                    break
+    return selected
+
+
+def create_new_game_state(word_count: int = 3, round_num: int = 1):
+    # Properly proportioned grid sizes so words always fit cleanly
+    if word_count <= 2:
         size = 5
-    elif word_count <= 8:
+    elif word_count <= 4:
         size = 6
-    elif word_count <= 11:
+    elif word_count <= 6:
+        size = 7
+    elif word_count <= 8:
         size = 8
+    elif word_count <= 11:
+        size = 9
     else:
         size = 10
-        
-    # Scale word lengths based on round difficulty
+
+    # Progressive word length curve based on round
     if round_num <= 2:
         min_len, max_len = 3, 4
     elif round_num <= 5:
@@ -162,178 +299,193 @@ def create_new_game_state(word_count=3, round_num=1):
     elif round_num <= 10:
         min_len, max_len = 4, 6
     elif round_num <= 20:
-        min_len, max_len = 5, 6
+        min_len, max_len = 5, 7
     elif round_num <= 35:
         min_len, max_len = 5, 8
     else:
         min_len, max_len = 6, 8
 
-    # Bound lengths by grid size limit
-    min_len = min(min_len, size)
     max_len = min(max_len, size)
-    if min_len > max_len:
-        min_len = max_len
+    min_len = min(min_len, max_len)
 
-    valid_words = [w for w in WORD_LIST if min_len <= len(w) <= max_len]
-    if len(valid_words) < word_count:
-        valid_words = [w for w in WORD_LIST if len(w) <= size]
+    valid_words: list[str] = []
+    for length in range(min_len, max_len + 1):
+        valid_words.extend(WORDS_BY_LEN.get(length, []))
 
-    UNIQUE_PALETTE = [
-        ((250, 80, 80), (150, 40, 40)),   # Red
-        ((80, 250, 80), (40, 150, 40)),   # Green
-        ((80, 150, 250), (40, 80, 150)),  # Light Blue
-        ((250, 80, 250), (150, 40, 150)), # Magenta
-        ((250, 200, 50), (150, 120, 30)), # Yellow
-        ((50, 200, 250), (20, 120, 150)), # Cyan
-        ((250, 130, 50), (150, 70, 20)),  # Orange
-        ((150, 50, 250), (80, 20, 150))   # Purple
-    ]
+    if len(valid_words) < word_count * 2:
+        for length in range(3, size + 1):
+            valid_words.extend(WORDS_BY_LEN.get(length, []))
+        valid_words = list(dict.fromkeys(valid_words))
 
-    grid = []
-    words_info = {}
+    best_grid = None
+    best_words_info = {}
 
-    # Try up to 10 times to successfully place all target words
-    for attempt in range(10):
-        grid = [['' for _ in range(size)] for _ in range(size)]
+    for _attempt in range(25):
+        grid = [["" for _ in range(size)] for _ in range(size)]
         words_info = {}
         actual_count = min(word_count, len(valid_words))
-        target_words = random.sample(valid_words, actual_count)
+        target_words = _select_non_substring_words(valid_words, actual_count)
+        # Place longest words first for near-100% placement reliability
+        target_words.sort(key=len, reverse=True)
 
-        random.shuffle(UNIQUE_PALETTE)
-        mixture = ["cross", "plus", "cross", "plus", "any", "any", "any", "any"]
+        palette = FOUND_PALETTE[:]
+        random.shuffle(palette)
+        mixture = ["cross", "plus", "any", "cross", "plus", "any"]
         random.shuffle(mixture)
 
-        placed_all = True
         for idx, word in enumerate(target_words):
             force_type = mixture[idx % len(mixture)]
             positions = place_word(word, grid, size, force_type)
-            if not positions:
+            if not positions and force_type != "any":
                 positions = place_word(word, grid, size, "any")
 
             if positions:
-                col_idx = idx % len(UNIQUE_PALETTE)
+                col_idx = idx % len(palette)
                 words_info[word] = {
                     "positions": positions,
-                    "color": UNIQUE_PALETTE[col_idx][0],
-                    "shadow": UNIQUE_PALETTE[col_idx][1]
+                    "color": palette[col_idx][0],
+                    "shadow": palette[col_idx][1],
                 }
-            else:
-                placed_all = False
-                break
 
-        if placed_all:
+        if len(words_info) > len(best_words_info):
+            best_grid = [row[:] for row in grid]
+            best_words_info = dict(words_info)
+
+        if len(words_info) >= actual_count:
             break
 
-    # Fill remaining blanks
+    grid = best_grid if best_grid is not None else [["" for _ in range(size)] for _ in range(size)]
+    words_info = best_words_info
+
+    # Fill remaining empty cells with weighted common letters so decoys look natural
+    filler_pool = "AAEEIIOOUURRSSRTTLNNLLCCDDMMPBGHHFFYYWKV"
     for r in range(size):
         for c in range(size):
-            if grid[r][c] == '':
-                grid[r][c] = random.choice(string.ascii_uppercase)
-                
+            if grid[r][c] == "":
+                grid[r][c] = random.choice(filler_pool)
+
     theme_name = random.choice(list(THEMES.keys()))
     return grid, words_info, theme_name
 
-def render_grid_image(grid, words_info, found_words, round_num=1, category="RANDOM", theme_name="emerald"):
-    download_font_if_missing()
+
+def render_grid_image(
+    grid: list[list[str]],
+    words_info: dict,
+    found_words: list[str],
+    round_num: int = 1,
+    category: str = "ARCADE",
+    theme_name: str = "emerald",
+) -> BytesIO:
     theme = THEMES.get(theme_name, THEMES["emerald"])
-    
+
     size = len(grid)
-    cell_size = 110
-    
-    margin_side = 50
-    margin_top = 160
-    margin_bottom = 50
-    
+    cell_size = 104 if size <= 7 else (94 if size <= 9 else 86)
+
+    margin_side = 46
+    margin_top = 156
+    margin_bottom = 48
+
     grid_width = size * cell_size + margin_side * 2
     grid_height = size * cell_size + margin_top + margin_bottom
 
-    img = Image.new('RGB', (grid_width, grid_height), color=theme["bg"])
+    img = Image.new("RGB", (grid_width, grid_height), color=theme["bg"])
     draw = ImageDraw.Draw(img)
 
-    try:
-        font_large = ImageFont.truetype(FONT_PATH, 42)
-        font_small = ImageFont.truetype(FONT_PATH, 24)
-        font_letter = ImageFont.truetype(FONT_PATH, 65)
-    except IOError:
-        font_large = font_small = font_letter = ImageFont.load_default()
+    font_title = get_cached_font(40)
+    font_sub = get_cached_font(23)
+    font_letter = get_cached_font(int(cell_size * 0.58))
 
-    # Draw Title
-    title_text = f"{category} WORD GRID"
-    if hasattr(font_large, 'getbbox'):
-        bbox = font_large.getbbox(title_text)
-        title_w = bbox[2] - bbox[0]
-    else:
-        title_w, _ = draw.textsize(title_text, font=font_large)
-    draw.text(((grid_width - title_w) / 2, 35), title_text, fill=theme["top_text"], font=font_large)
-    
-    # Subtitle
-    sub_text = f"Round {round_num}  |  {len(words_info)} words  |  Found: {len(found_words)}/{len(words_info)}"
-    if hasattr(font_small, 'getbbox'):
-        bbox = font_small.getbbox(sub_text)
-        sub_w = bbox[2] - bbox[0]
-    else:
-        sub_w, _ = draw.textsize(sub_text, font=font_small)
-    draw.text(((grid_width - sub_w) / 2, 95), sub_text, fill=theme["text_col"], font=font_small)
-
-    # Line Separator
-    draw.line([(0, 140), (grid_width, 140)], fill=theme["board_glow"], width=4)
-    
-    # Outer glowing board enclosure
-    rect_pad = 12
+    # Top header banner card
     draw.rounded_rectangle(
-        [margin_side - rect_pad, margin_top - rect_pad, 
-         margin_side + size * cell_size + rect_pad, margin_top + size * cell_size + rect_pad],
-        radius=18, outline=theme["board_glow"], width=5
+        [20, 18, grid_width - 20, 128],
+        radius=16,
+        fill=theme["header_bg"],
+        outline=theme["board_glow"],
+        width=2,
     )
 
-    # Draw Cells
+    title_text = f"{category.upper()} WORD GRID"
+    title_w, _, _ = _text_metrics(draw, title_text, font_title)
+    draw.text(
+        ((grid_width - title_w) / 2, 28),
+        title_text,
+        fill=theme["top_text"],
+        font=font_title,
+    )
+
+    sub_text = f"ROUND {round_num}   •   THEME: {theme_name.upper()}   •   FOUND: {len(found_words)}/{len(words_info)}"
+    sub_w, _, _ = _text_metrics(draw, sub_text, font_sub)
+    draw.text(
+        ((grid_width - sub_w) / 2, 84),
+        sub_text,
+        fill=theme["text_col"],
+        font=font_sub,
+    )
+
+    # Outer glowing board frame
+    rect_pad = 12
+    draw.rounded_rectangle(
+        [
+            margin_side - rect_pad,
+            margin_top - rect_pad,
+            margin_side + size * cell_size + rect_pad,
+            margin_top + size * cell_size + rect_pad,
+        ],
+        radius=20,
+        fill=theme["cell_shadow"],
+        outline=theme["board_glow"],
+        width=4,
+    )
+
+    # Pre-map cell colors for found words
+    cell_highlight: dict[tuple[int, int], tuple[tuple[int, int, int], tuple[int, int, int]]] = {}
+    for fw in found_words:
+        if fw in words_info:
+            f_col = words_info[fw]["color"]
+            s_col = words_info[fw]["shadow"]
+            for pos in words_info[fw]["positions"]:
+                cell_highlight[tuple(pos)] = (f_col, s_col)
+
+    # Draw 3D beveled cells
     for row in range(size):
         for col in range(size):
             letter = grid[row][col]
-            
             x0 = margin_side + col * cell_size
             y0 = margin_top + row * cell_size
-            
-            cx0, cy0 = x0 + 6, y0 + 6
-            cx1, cy1 = x0 + cell_size - 6, y0 + cell_size - 6
-            
-            # Default to un-found Theme Colors
-            fill_col = theme["cell_fill"]
-            shadow_col = theme["cell_shadow"]
-            txt_col = theme["text_col"]
-            
-            # Look up if it's found
-            for fw in found_words:
-                if (row, col) in words_info[fw]["positions"]:
-                    fill_col = words_info[fw]["color"]
-                    shadow_col = words_info[fw]["shadow"]
-                    txt_col = (255, 255, 255) # Override text to white for found pop
-            
-            # Huge 3D depth effect:
-            draw.rounded_rectangle([cx0+3, cy0+8, cx1+3, cy1+8], radius=15, fill=shadow_col)
-            draw.rounded_rectangle([cx0, cy0, cx1, cy1], radius=15, fill=fill_col)
-            
-            lighter_shade = tuple(min(255, c + 40) for c in fill_col)
-            draw.rounded_rectangle([cx0+3, cy0+3, cx1-3, cy1-3], radius=13, outline=lighter_shade, width=2)
-            
-            # Draw letter
-            if hasattr(font_letter, 'getbbox'):
-                bbox = font_letter.getbbox(letter)
-                text_w = bbox[2] - bbox[0]
-                text_h = bbox[3] - bbox[1] 
-                y_offset = bbox[1] 
+
+            cx0, cy0 = x0 + 5, y0 + 5
+            cx1, cy1 = x0 + cell_size - 5, y0 + cell_size - 5
+
+            if (row, col) in cell_highlight:
+                fill_col, shadow_col = cell_highlight[(row, col)]
+                txt_col = (255, 255, 255)
             else:
-                text_w, text_h = draw.textsize(letter, font=font_letter)
-                y_offset = 0
-                
+                fill_col = theme["cell_fill"]
+                shadow_col = theme["cell_shadow"]
+                txt_col = theme["text_col"]
+
+            # 3D shadow + main tile + top bevel highlight
+            draw.rounded_rectangle([cx0 + 2, cy0 + 6, cx1 + 2, cy1 + 6], radius=14, fill=shadow_col)
+            draw.rounded_rectangle([cx0, cy0, cx1, cy1], radius=14, fill=fill_col)
+
+            lighter_shade = tuple(min(255, c + 42) for c in fill_col)
+            draw.rounded_rectangle(
+                [cx0 + 2, cy0 + 2, cx1 - 2, cy1 - 2],
+                radius=12,
+                outline=lighter_shade,
+                width=2,
+            )
+
+            text_w, text_h, y_offset = _text_metrics(draw, letter, font_letter)
             tx = cx0 + ((cx1 - cx0) - text_w) / 2
             ty = cy0 + ((cy1 - cy0) - text_h) / 2 - y_offset
-            
+
+            # Subtle letter drop-shadow for crisp contrast
+            draw.text((tx + 2, ty + 2), letter, fill=shadow_col, font=font_letter)
             draw.text((tx, ty), letter, fill=txt_col, font=font_letter)
 
     img_io = BytesIO()
-    img.save(img_io, 'PNG')
+    img.save(img_io, format="PNG", optimize=True)
     img_io.name = "grid.png"
     img_io.seek(0)
-    
     return img_io

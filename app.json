@@ -1,0 +1,53 @@
+{
+  "name": "Word Grid Arcade Bot",
+  "description": "3D Word Search Arcade Telegram Bot built with Pyrogram & MongoDB, optimized for Heroku.",
+  "keywords": ["telegram", "bot", "wordgame", "pyrogram", "mongodb", "arcade"],
+  "env": {
+    "API_ID": {
+      "description": "Telegram API_ID from my.telegram.org",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Telegram API_HASH from my.telegram.org",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "MONGO_URI": {
+      "description": "MongoDB Atlas Connection URI",
+      "required": true
+    },
+    "DB_NAME": {
+      "description": "MongoDB Database Name",
+      "value": "WordGridBotDB",
+      "required": false
+    },
+    "SUDO_USERS": {
+      "description": "Comma-separated list of Admin Telegram User IDs",
+      "required": false
+    },
+    "SUPPORT_GROUP": {
+      "description": "Support group URL",
+      "value": "https://t.me/+S0Q1-J_EQLA3YmU1",
+      "required": false
+    },
+    "UPDATE_CHANNEL": {
+      "description": "Updates channel URL",
+      "value": "https://t.me/NOBITA_SUPP0RT",
+      "required": false
+    }
+  },
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}
