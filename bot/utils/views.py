@@ -1,7 +1,7 @@
 import html
 import unicodedata
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from bot.config import SUPPORT_GROUP, UPDATE_CHANNEL
+from bot.config import SUPPORT_GROUP, UPDATE_CHANNEL, TIME_ZONE
 
 
 def normalize_fancy_telegram_name(name: str | None, max_len: int = 26) -> str:
@@ -32,6 +32,37 @@ def format_hint_pattern(word: str, revealed_indices: set[int] | None = None) -> 
 
     chars = [w[i] if i in shown else "_" for i in range(n)]
     return " ".join(chars)
+
+
+def _fmt_tab(label: str, active: bool) -> str:
+    return f"« {label} »" if active else label
+
+
+def markup_dict_to_pyrogram(markup_dict: dict | None) -> InlineKeyboardMarkup | None:
+    """Converts a Bot API reply_markup dict into a Pyrogram InlineKeyboardMarkup for fallback."""
+    if not markup_dict or "inline_keyboard" not in markup_dict:
+        return None
+    pyro_rows = []
+    for row in markup_dict["inline_keyboard"]:
+        p_row = []
+        for btn in row:
+            if "url" in btn:
+                p_row.append(InlineKeyboardButton(btn["text"], url=btn["url"]))
+            elif "switch_inline_query" in btn:
+                p_row.append(
+                    InlineKeyboardButton(
+                        btn["text"], switch_inline_query=btn["switch_inline_query"]
+                    )
+                )
+            else:
+                p_row.append(
+                    InlineKeyboardButton(
+                        btn["text"], callback_data=btn.get("callback_data", "noop")
+                    )
+                )
+        if p_row:
+            pyro_rows.append(p_row)
+    return InlineKeyboardMarkup(pyro_rows)
 
 
 # ============================================================================
@@ -77,7 +108,6 @@ def build_game_caption(game_data: dict, status_banner: str | None = None) -> str
 
 
 def build_game_board_markup(solved: bool = False) -> InlineKeyboardMarkup:
-    """Compact inline buttons for the Word Grid board (short labels so text never overflows)."""
     if solved:
         return InlineKeyboardMarkup(
             [
@@ -102,87 +132,325 @@ def build_game_board_markup(solved: bool = False) -> InlineKeyboardMarkup:
 
 
 # ============================================================================
-# WORDSEEK BOARD VIEW & COMPACT LETTER BUTTONS
+# BOT API 10.3 RICH MESSAGE HELP VIEW (Ported 1:1 from WordSeek-master/src/commands/help.ts)
 # ============================================================================
-def build_wordseek_board_view(
-    guesses: list[str],
-    solution: str,
-    max_guesses: int = 30,
-    evaluate_fn=None,
-    format_row_fn=None,
-) -> tuple[str, InlineKeyboardMarkup]:
-    """
-    Builds the WordSeek board message (HTML) + interactive letter hint buttons.
-    Each button uses a short 2-char label (`🟩S`, `🟨T`, `🟥A`) so 4/5/6 buttons per row fit cleanly.
-    """
-    word_len = len(solution)
-    rows_html = []
-    if format_row_fn:
-        for g in guesses:
-            rows_html.append(format_row_fn(g, solution))
+EXAMPLE_STYLE = {
+    "correct": ' style="success"',
+    "present": "",
+    "absent": ' style="danger"',
+}
 
-    text = (
-        f"🟩 <b>WordSeek — {word_len}-Letter Mode</b>  (<i>{len(guesses)}/{max_guesses} guesses</i>)\n"
-        f"<blockquote>" + ("\n".join(rows_html) if rows_html else "Type a word to guess!") + "</blockquote>\n"
-        f"<i>Tap any letter button below to see its color hint, or type a {word_len}-letter word!</i>"
+
+def _example_button(state: str, letter: str) -> str:
+    st_attr = EXAMPLE_STYLE.get(state, "")
+    return f'<tg-button type="callback_data"{st_attr} data="wh:{state}:{letter}">{letter}</tg-button>'
+
+
+def build_rich_help_html(section: str = "howto") -> str:
+    """
+    Returns Bot API 10.3 RichMessage HTML for `/help` and `help_*` callbacks,
+    using `<tg-button>`, `<h3>`, `<h4>`, `<table bordered compact>`, and `<details>`.
+    """
+    if section == "grid":
+        return (
+            "<h3>How to Play Word Grid Arcade</h3>"
+            "<blockquote>"
+            "<ol>"
+            "<li>Start a round in any group chat using /game</li>"
+            "<li>Find words hidden horizontally, vertically, or diagonally on the 3D board</li>"
+            "<li>Check the caption hints or tap the Hint button to reveal letters</li>"
+            "<li>Type the word in chat to score points before the timer runs out</li>"
+            "<li>Clear all words in time to advance to the next harder round!</li>"
+            "</ol>"
+            "</blockquote>"
+            "<h4>Grid Commands</h4>"
+            "<table bordered compact>"
+            "<tr><th>Command</th><th>What it does</th></tr>"
+            "<tr><td>/game</td><td>Start a 3D Word Grid round in a group</td></tr>"
+            "<tr><td>/hint</td><td>Reveal a letter hint (up to 3 per round)</td></tr>"
+            "<tr><td>/stopgame</td><td>Stop the active round and reset to Round 1</td></tr>"
+            "<tr><td>/profile</td><td>View your combined Word Grid &amp; WordSeek card</td></tr>"
+            "</table>"
+        )
+
+    if section == "scores":
+        return (
+            "<h3>Leaderboard &amp; Scores</h3>"
+            "<h4>Quick Examples</h4>"
+            "<blockquote>"
+            "<table bordered compact>"
+            "<tr><th>Command</th><th>What it shows</th></tr>"
+            "<tr><td><code>/leaderboard</code></td><td>Group, today (5-letter)</td></tr>"
+            "<tr><td><code>/leaderboard 4</code></td><td>4-letter, group, today</td></tr>"
+            "<tr><td><code>/leaderboard global week 6</code></td><td>Global, this week, 6-letter</td></tr>"
+            "<tr><td><code>/leaderboard month</code></td><td>This group's monthly board</td></tr>"
+            "<tr><td><code>/score</code></td><td>Your score (group, today, 5-letter)</td></tr>"
+            "<tr><td><code>/score 6</code></td><td>Your 6-letter stats</td></tr>"
+            "<tr><td><code>/score @username global all 4</code></td><td>Full 4-letter global history for a user</td></tr>"
+            "</table>"
+            "</blockquote>"
+            "<h4>Leaderboard Command</h4>"
+            "<blockquote>"
+            "<p><b>Syntax:</b> <code>/leaderboard [scope] [period] [length]</code></p>"
+            "<table bordered compact>"
+            "<tr><th>Parameter</th><th>Options</th></tr>"
+            "<tr><td>Scope</td><td><code>group</code> (default), <code>global</code></td></tr>"
+            "<tr><td>Period</td><td><code>today</code>, <code>week</code>, <code>month</code>, <code>year</code>, <code>all</code></td></tr>"
+            "<tr><td>Length</td><td><code>4</code>, <code>5</code> (default), <code>6</code></td></tr>"
+            "</table>"
+            "</blockquote>"
+        )
+
+    if section == "group":
+        return (
+            "<h3>Group Settings (Admin Only)</h3>"
+            "<h4>Authorized Users</h4>"
+            "<blockquote>"
+            "<p><b><code>/seekauth</code></b>: manage users who can end games without a vote.</p>"
+            "<ul>"
+            "<li><code>/seekauth @username</code>: authorize a user</li>"
+            "<li><code>/seekauth remove @username</code>: remove authorization</li>"
+            "<li><code>/seekauth list</code>: list all authorized users</li>"
+            "</ul>"
+            "</blockquote>"
+            "<h4>Game Topic (Forum Groups)</h4>"
+            "<details><summary><code>/setgametopic</code>: restrict games to topics</summary>"
+            "<blockquote><p>Run this command inside the topic where you want games to be played.</p></blockquote>"
+            "</details>"
+            "<details><summary><code>/unsetgametopic</code>: remove topic restriction</summary>"
+            "<blockquote><p>After unsetting, the bot can run games in any topic again.</p></blockquote>"
+            "</details>"
+            "<details><summary><code>/allowonlylen</code>: restrict word lengths</summary>"
+            "<blockquote>"
+            "<ul><li><code>/allowonlylen 4</code></li><li><code>/allowonlylen 5 6</code></li></ul>"
+            "<p>The first number becomes the default length for <code>/new</code> in that topic.</p>"
+            "</blockquote>"
+            "</details>"
+        )
+
+    if section == "other":
+        return (
+            "<h3>Other Commands</h3>"
+            "<blockquote>"
+            "<p><b><code>/id</code></b>: get message, user, chat, and topic IDs.</p>"
+            "<p><b><code>/profile</code></b>: view your combined Word Grid &amp; WordSeek profile card.</p>"
+            "</blockquote>"
+        )
+
+    if section == "admin":
+        return (
+            "<h3>Admin Commands (Bot Owner Only)</h3>"
+            "<blockquote>"
+            "<table bordered compact>"
+            "<tr><th>Command</th><th>What it does</th></tr>"
+            "<tr><td><code>/panel</code></td><td>Open Admin Control Panel</td></tr>"
+            "<tr><td><code>/stats</code></td><td>View live bot &amp; system stats</td></tr>"
+            "<tr><td><code>/ban [user_id]</code></td><td>Ban a user from using the bot globally</td></tr>"
+            "<tr><td><code>/unban [user_id]</code></td><td>Unban a previously banned user</td></tr>"
+            "<tr><td><code>/transfer &lt;from&gt; &lt;to&gt;</code></td><td>Transfer WordSeek scores between users</td></tr>"
+            "<tr><td><code>/broadcast</code></td><td>Broadcast replied message to all users &amp; groups</td></tr>"
+            "</table>"
+            "</blockquote>"
+        )
+
+    # Default: "howto" — exact port of getHowToPlayMessage() from WordSeek-master/src/commands/help.ts
+    ex_s = _example_button("correct", "S")
+    ex_t = _example_button("present", "T")
+    ex_x = _example_button("absent", "X")
+    ex_row = (
+        _example_button("correct", "S")
+        + _example_button("present", "T")
+        + _example_button("absent", "A")
+        + _example_button("absent", "R")
+        + _example_button("correct", "E")
+    )
+    return (
+        "<h3>How to Play WordSeek</h3>"
+        "<blockquote>"
+        "<ol>"
+        "<li>Start a game using /new, /new4, /new5, or /new6</li>"
+        "<li>Guess the hidden word</li>"
+        "<li>After each guess, every letter becomes a colored button (see below)</li>"
+        "<li>First person to guess correctly wins!</li>"
+        "<li>Maximum 30 guesses per game</li>"
+        "</ol>"
+        "</blockquote>"
+        "<h4>Reading the colors</h4>"
+        f"<p>{ex_s} <b>Green</b>: right letter, right spot</p>"
+        f"<p>{ex_t} <b>No color</b>: right letter, wrong spot</p>"
+        f"<p>{ex_x} <b>Red</b>: letter isn't in the word</p>"
+        "<p><i>Tap any letter button to see what it means. The no color button follows your Telegram theme.</i></p>"
+        "<p><b>Example guess:</b></p>"
+        f"<p>{ex_row}</p>"
+        "<h4>Word Length Modes</h4>"
+        "<blockquote>"
+        "<ul>"
+        "<li>/new: start the default 5-letter game</li>"
+        "<li>/new 4: start a specific length (4, 5, or 6)</li>"
+        "<li>/new4: start a 4-letter game</li>"
+        "<li>/new5: start a 5-letter game</li>"
+        "<li>/new6: start a 6-letter game</li>"
+        "</ul>"
+        "</blockquote>"
+        "<h4>Basic Commands</h4>"
+        "<table bordered compact>"
+        "<tr><th>Command</th><th>What it does</th></tr>"
+        "<tr><td>/new</td><td>Start a new WordSeek game (default 5L)</td></tr>"
+        "<tr><td>/new4 /new5 /new6</td><td>Start a game with that length</td></tr>"
+        "<tr><td>/end</td><td>End current game (voting or admin)</td></tr>"
+        "<tr><td>/daily</td><td>Play Daily WordSeek (private chat only)</td></tr>"
+        "<tr><td>/pausedaily</td><td>Pause Daily mode</td></tr>"
+        "<tr><td>/game</td><td>Start 3D Word Grid Arcade (groups)</td></tr>"
+        "</table>"
+        "<details><summary>Daily Mode (Private Chat Only)</summary>"
+        "<blockquote>"
+        "<ul>"
+        "<li>Start a daily game using /daily command</li>"
+        "<li>One fixed 5-letter word per day with 6 guesses</li>"
+        f"<li>Unlocks every day at 06:00 ({html.escape(TIME_ZONE)})</li>"
+        "<li>If Daily is active, use /pausedaily to play normal WordSeek again</li>"
+        "</ul>"
+        "</blockquote>"
+        "</details>"
     )
 
-    kb_rows = []
-    # Show interactive letter buttons for the latest 5 guesses so the keyboard stays compact
-    recent_guesses = guesses[-5:]
-    state_icon = {"correct": "🟩", "present": "🟨", "absent": "🟥"}
-    if evaluate_fn:
-        for g in recent_guesses:
-            states = evaluate_fn(g, solution)
-            btn_row = []
-            for idx, ch in enumerate(g.upper()):
-                st = states[idx]
-                icon = state_icon.get(st, "🟥")
-                btn_row.append(
-                    InlineKeyboardButton(
-                        f"{icon}{ch}",
-                        callback_data=f"wh:{st}:{ch}",
-                    )
-                )
-            kb_rows.append(btn_row)
 
-    kb_rows.append(
+def build_help_keyboard_dict(
+    is_admin: bool = False,
+    active: str = "howto",
+    show_back: bool = False,
+) -> dict:
+    """
+    Builds Bot API 10.3 `reply_markup` dict with `"style": "primary"` on active tabs
+    and `"style": "success"` on action buttons, matching WordSeek-master's `getMainHelpKeyboard`.
+    """
+    def _tab_btn(label: str, sec_key: str) -> dict:
+        is_act = active == sec_key
+        btn = {
+            "text": _fmt_tab(label, is_act),
+            "callback_data": f"help:{sec_key}",
+        }
+        if is_act:
+            btn["style"] = "primary"
+        return btn
+
+    rows = [
+        [_tab_btn("How to Play", "howto"), _tab_btn("Word Grid", "grid")],
+        [_tab_btn("Scores", "scores"), _tab_btn("Group Settings", "group")],
+        [_tab_btn("Other Commands", "other")],
+    ]
+    if is_admin:
+        rows[-1].append(_tab_btn("👑 Admin", "admin"))
+
+    rows.append(
         [
-            InlineKeyboardButton("💡 Hint", callback_data="ws:hint"),
-            InlineKeyboardButton("🛑 End", callback_data="ws:end"),
+            {"text": "📢 Updates", "url": UPDATE_CHANNEL},
+            {"text": "💬 Support", "url": SUPPORT_GROUP, "style": "success"},
         ]
     )
-    return text, InlineKeyboardMarkup(kb_rows)
+    if show_back:
+        rows.append([{"text": "⬅️ Back", "callback_data": "nav:home"}])
+
+    return {"inline_keyboard": rows}
+
+
+def build_help_view(
+    bot_username: str,
+    section: str = "howto",
+    is_admin: bool = False,
+    show_back: bool = True,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Fallback Pyrogram HTML help view when editing a photo caption (such as from /start)."""
+    uname = bot_username or "WordGridGameBot"
+    kb_dict = build_help_keyboard_dict(is_admin=is_admin, active=section, show_back=show_back)
+    pyro_markup = markup_dict_to_pyrogram(kb_dict)
+
+    if section == "grid":
+        text = (
+            "🧩 <b>How to Play Word Grid Arcade</b>\n\n"
+            "<blockquote>"
+            "1. Send <code>/game</code> in a group chat to start Round 1.\n"
+            "2. Find words hidden horizontally, vertically, or diagonally.\n"
+            "3. Check the caption for hints like <code>A _ _ _ E (5L)</code> or tap <b>💡 Hint</b>.\n"
+            "4. Type found words in chat to score points!"
+            "</blockquote>"
+        )
+    elif section == "scores":
+        text = (
+            "🏆 <b>Leaderboard &amp; Scores</b>\n\n"
+            "<blockquote>"
+            "• <code>/leaderboard [global|group] [today|week|month|all] [4|5|6]</code>\n"
+            "• <code>/score [@user] [global|group] [today|week|month|all] [4|5|6]</code>\n"
+            "• <code>/profile</code> — Combined Word Grid &amp; WordSeek card"
+            "</blockquote>"
+        )
+    elif section == "group":
+        text = (
+            "⚙️ <b>Group Settings (Admin Only)</b>\n\n"
+            "<blockquote>"
+            "• <code>/seekauth @user</code> / <code>remove</code> / <code>list</code>\n"
+            "• <code>/setgametopic</code> &amp; <code>/unsetgametopic</code>\n"
+            "• <code>/allowonlylen 5 4 6</code>"
+            "</blockquote>"
+        )
+    elif section == "other":
+        text = (
+            "🆔 <b>Other Commands</b>\n\n"
+            "<blockquote>"
+            "• <code>/id</code> — View chat, user, topic, and message IDs\n"
+            "• <code>/profile</code> — View your player profile card"
+            "</blockquote>"
+        )
+    elif section == "admin":
+        text = (
+            "👑 <b>Admin Commands</b>\n\n"
+            "<blockquote>"
+            "• <code>/panel</code>, <code>/stats</code>, <code>/broadcast</code>\n"
+            "• <code>/ban [id]</code>, <code>/unban [id]</code>, <code>/transfer &lt;from&gt; &lt;to&gt;</code>"
+            "</blockquote>"
+        )
+    else:
+        text = (
+            "🟩 <b>How to Play WordSeek</b>\n\n"
+            "<blockquote>"
+            "1. Start a game using <code>/new</code>, <code>/new4</code>, <code>/new5</code>, or <code>/new6</code>.\n"
+            "2. Guess the hidden word — each letter becomes a colored button in the message:\n"
+            "   🟩 <b>Green:</b> right letter, right spot\n"
+            "   🟨 <b>Default:</b> right letter, wrong spot\n"
+            "   🟥 <b>Red:</b> letter isn't in the word\n"
+            "3. First player to guess wins! Max 30 guesses.\n"
+            "4. Use <code>/daily</code> in DM for the 6-try Word of the Day!"
+            "</blockquote>"
+        )
+    return text, pyro_markup
 
 
 # ============================================================================
-# SHARED START, HELP, PROFILE, SCORE & LEADERBOARD VIEWS (@tgbot Rule 5)
+# SHARED START & PROFILE VIEWS
 # ============================================================================
 def build_start_view(
     first_name: str, bot_username: str, is_private: bool = True
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Single Source of Truth view builder for `/start` and `nav:home`."""
     safe_name = normalize_fancy_telegram_name(first_name)
     uname = bot_username or "WordGridGameBot"
 
     if not is_private:
         text = (
-            "🎮 <b>Word Arcade &amp; WordSeek Ready!</b>\n\n"
+            "🎮 <b>WordSeek &amp; Word Grid Ready!</b>\n\n"
             "<blockquote>"
-            "🧩 <b>Word Grid (3D Search):</b> <code>/game</code>  •  <code>/stopgame</code>  •  <code>/hint</code>\n"
-            "🟩 <b>WordSeek (Wordle 4/5/6L):</b> <code>/new</code>  •  <code>/new4</code>  •  <code>/new5</code>  •  <code>/new6</code>  •  <code>/end</code>\n"
-            "🏆 <b>Stats &amp; Ranks:</b> <code>/score</code>  •  <code>/profile</code>  •  <code>/leaderboard</code>"
-            "</blockquote>\n"
-            "⚡ <i>Tap a game mode below to start playing!</i>"
+            "🟩 <b>WordSeek:</b> <code>/new</code> • <code>/new4</code> • <code>/new5</code> • <code>/new6</code> • <code>/end</code>\n"
+            "🧩 <b>Word Grid:</b> <code>/game</code> • <code>/hint</code> • <code>/stopgame</code>\n"
+            "🏆 <b>Ranks &amp; Scores:</b> <code>/leaderboard</code> • <code>/score</code>"
+            "</blockquote>"
         )
         markup = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("🧩 Start Grid", callback_data="game:new"),
                     InlineKeyboardButton("🟩 Start Seek", callback_data="ws:new:5"),
+                    InlineKeyboardButton("🧩 Start Grid", callback_data="game:new"),
                 ],
                 [
-                    InlineKeyboardButton("🏆 Ranks", callback_data="nav:lb"),
+                    InlineKeyboardButton("🏆 Ranks", callback_data="wslb:group:all:5"),
                     InlineKeyboardButton("📖 Help", callback_data="help:howto"),
                 ],
             ]
@@ -190,18 +458,14 @@ def build_start_view(
         return text, markup
 
     text = (
-        f"🎮 <b>Welcome to Word Grid &amp; WordSeek!</b>\n\n"
-        f"Hey <b>{safe_name}</b>! Play <b>two complete word games</b> in one bot:\n\n"
-        f"<blockquote>"
-        f"🧩 <b>1. Word Grid Arcade (3D Word Search)</b>\n"
-        f"• <code>/game</code> — Start 3D Grid Round in groups\n"
-        f"• <code>/hint</code> — Reveal a letter  |  <code>/stopgame</code> — Stop\n\n"
-        f"🟩 <b>2. WordSeek (Wordle 4, 5 &amp; 6 Letters)</b>\n"
-        f"• <code>/new</code> or <code>/wordseek</code> — Start 5L WordSeek\n"
-        f"• <code>/new4</code> <code>/new5</code> <code>/new6</code> — Pick word length\n"
-        f"• <code>/daily</code> — Daily WordSeek (DM)  |  <code>/end</code> — End game\n\n"
-        f"🏆 <b>Ranks &amp; Stats:</b> <code>/score</code>  •  <code>/profile</code>  •  <code>/leaderboard</code>"
-        f"</blockquote>"
+        f"<b>Welcome to WordSeek &amp; Word Grid!</b>\n\n"
+        f"Hey <b>{safe_name}</b>! Play competitive WordSeek (Wordle 4L/5L/6L) and 3D Word Grid directly on Telegram.\n\n"
+        f"<blockquote><b>Quick Start:</b>\n"
+        f"• Use <code>/new</code> (or <code>/new4</code>, <code>/new5</code>, <code>/new6</code>) to start WordSeek\n"
+        f"• Use <code>/daily</code> for WordSeek of the Day (6 attempts)\n"
+        f"• Use <code>/game</code> in a group for 3D Word Grid Arcade\n"
+        f"• Use <code>/help</code> for detailed instructions and command list</blockquote>\n\n"
+        f"Ready to test your word skills? Let's play!"
     )
 
     markup = InlineKeyboardMarkup(
@@ -217,132 +481,17 @@ def build_start_view(
                 InlineKeyboardButton("🎯 Daily", callback_data="ws:daily"),
             ],
             [
-                InlineKeyboardButton("🏆 Ranks", callback_data="nav:lb"),
+                InlineKeyboardButton("🏆 Ranks", callback_data="wslb:global:all:5"),
                 InlineKeyboardButton("👤 Profile", callback_data="nav:profile"),
                 InlineKeyboardButton("📖 Help", callback_data="help:howto"),
             ],
             [
-                InlineKeyboardButton("💬 Support", url=SUPPORT_GROUP),
-                InlineKeyboardButton("📢 Channel", url=UPDATE_CHANNEL),
+                InlineKeyboardButton("📢 Updates", url=UPDATE_CHANNEL),
+                InlineKeyboardButton("💬 Discussion", url=SUPPORT_GROUP),
             ],
         ]
     )
     return text, markup
-
-
-def _fmt_tab(label: str, active: bool) -> str:
-    return f"« {label} »" if active else label
-
-
-def build_help_view(
-    bot_username: str,
-    section: str = "howto",
-    is_admin: bool = False,
-    show_back: bool = True,
-) -> tuple[str, InlineKeyboardMarkup]:
-    """
-    Single Source of Truth tabbed Help builder for `/help` and `help:*` / `nav:help` callbacks.
-    Covers both WordSeek and Word Grid Arcade with compact tab buttons.
-    """
-    uname = bot_username or "WordGridGameBot"
-
-    if section == "grid":
-        text = (
-            "🧩 <b>How to Play Word Grid Arcade</b>\n\n"
-            "<blockquote>"
-            "1. Send <code>/game</code> in a group chat to start Round 1.\n"
-            "2. Find hidden words horizontally (→), vertically (↓), or diagonally (↘ ↙).\n"
-            "3. Check the caption for letter hints like <code>A _ _ _ E (5L)</code> or tap <b>💡 Hint</b>.\n"
-            "4. Type found words in chat to score points!\n"
-            "5. Clear all words before the timer ends to advance to the next round."
-            "</blockquote>\n\n"
-            "⭐ <b>Grid Scoring:</b>\n"
-            "• <b>3–4L:</b> <code>+1 pt</code>  |  <b>5–6L:</b> <code>+2 pts</code>  |  <b>7–8L:</b> <code>+3 pts</code> (+1 bonus every 10 rounds)"
-        )
-    elif section == "scores":
-        text = (
-            "🏆 <b>Leaderboards &amp; Scores Guide</b>\n\n"
-            "<blockquote>"
-            "• <code>/leaderboard</code> — Open interactive Dual Leaderboard\n"
-            "• <code>/leaderboard global week 5</code> — Filter WordSeek ranks\n"
-            "• <code>/score</code> — View your WordSeek &amp; Daily streak stats\n"
-            "• <code>/score @username global all 5</code> — Inspect a player's score\n"
-            "• <code>/profile</code> or <code>/rank</code> — View combined player card"
-            "</blockquote>\n\n"
-            "📊 <b>Filter Options:</b>\n"
-            "• <b>Scope:</b> <code>group</code>, <code>global</code>\n"
-            "• <b>Period:</b> <code>today</code>, <code>week</code>, <code>month</code>, <code>year</code>, <code>all</code>\n"
-            "• <b>Length:</b> <code>4</code>, <code>5</code>, <code>6</code>"
-        )
-    elif section == "group":
-        text = (
-            "⚙️ <b>Group &amp; Topic Settings (Admins)</b>\n\n"
-            "<blockquote>"
-            "🔐 <b>Authorized Users:</b>\n"
-            "• <code>/seekauth @user</code> — Allow user to end WordSeek without voting\n"
-            "• <code>/seekauth remove @user</code> — Remove user\n"
-            "• <code>/seekauth list</code> — View authorized users\n\n"
-            "📌 <b>Forum Topics:</b>\n"
-            "• <code>/setgametopic</code> — Restrict games to current forum topic\n"
-            "• <code>/unsetgametopic</code> — Remove topic restriction\n"
-            "• <code>/allowonlylen 5 4 6</code> — Set allowed WordSeek lengths\n\n"
-            "🆔 <b>Utility:</b>\n"
-            "• <code>/id</code> — View chat, user, and replied message IDs"
-            "</blockquote>"
-        )
-    elif section == "admin":
-        text = (
-            "👑 <b>Bot Owner Commands (Sudo Only)</b>\n\n"
-            "<blockquote>"
-            "• <code>/panel</code> or <code>/admin</code> — Open Admin Control Panel\n"
-            "• <code>/stats</code> — Live system, RAM, and database statistics\n"
-            "• <code>/broadcast</code> — Reply to any message to broadcast\n"
-            "• <code>/ban [user_id]</code> — Ban a user globally\n"
-            "• <code>/unban [user_id]</code> — Unban a user\n"
-            "• <code>/transfer &lt;from_id&gt; &lt;to_id&gt;</code> — Transfer WordSeek scores"
-            "</blockquote>"
-        )
-    else:
-        section = "howto"
-        text = (
-            "🟩 <b>How to Play WordSeek</b>\n\n"
-            "<blockquote>"
-            "1. Start a game with <code>/new</code>, <code>/wordseek</code>, <code>/new4</code>, <code>/new5</code>, or <code>/new6</code>.\n"
-            "2. Type a valid 4, 5, or 6-letter word to guess.\n"
-            "3. Color feedback after every guess:\n"
-            "   🟩 <b>Green:</b> Right letter in the right spot\n"
-            "   🟨 <b>Yellow:</b> Right letter in the wrong spot\n"
-            "   🟥 <b>Red:</b> Letter is not in the word\n"
-            "4. First player to guess the secret word wins <code>(30 - guesses)</code> pts!\n"
-            "5. Use <code>/daily</code> in private chat for the 6-try Word of the Day!"
-            "</blockquote>\n\n"
-            "💡 <i>Switch tabs below for <b>🧩 Word Grid</b>, <b>🏆 Scores</b>, and <b>⚙️ Group</b> rules!</i>"
-        )
-
-    rows = [
-        [
-            InlineKeyboardButton(_fmt_tab("🟩 Seek", section == "howto"), callback_data="help:howto"),
-            InlineKeyboardButton(_fmt_tab("🧩 Grid", section == "grid"), callback_data="help:grid"),
-        ],
-        [
-            InlineKeyboardButton(_fmt_tab("🏆 Scores", section == "scores"), callback_data="help:scores"),
-            InlineKeyboardButton(_fmt_tab("⚙️ Group", section == "group"), callback_data="help:group"),
-        ],
-    ]
-    if is_admin:
-        rows.append(
-            [InlineKeyboardButton(_fmt_tab("👑 Admin", section == "admin"), callback_data="help:admin")]
-        )
-    rows.append(
-        [
-            InlineKeyboardButton("➕ Add Bot", url=f"https://t.me/{uname}?startgroup=true"),
-            InlineKeyboardButton("💬 Support", url=SUPPORT_GROUP),
-        ]
-    )
-    if show_back:
-        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="nav:home")])
-
-    return text, InlineKeyboardMarkup(rows)
 
 
 def build_profile_view(
@@ -353,7 +502,6 @@ def build_profile_view(
     seek_data: dict | None = None,
     show_back: bool = True,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Unified Player Profile Card showing both Word Grid Arcade & WordSeek stats."""
     safe_name = normalize_fancy_telegram_name(first_name)
     grid_score = (user_doc or {}).get("score", 0)
     games_played = (user_doc or {}).get("games_played", 0)
@@ -368,43 +516,136 @@ def build_profile_view(
     grid_rank_str = f"#{rank}" if rank > 0 else "Unranked"
     seek_rank_str = f"#{seek_rank}" if seek_rank > 0 else "Unranked"
 
-    total_combined = grid_score + seek_score
-    if total_combined >= 1000:
-        tier = "👑 Grand Word Legend"
-    elif total_combined >= 400:
-        tier = "💎 Word Grandmaster"
-    elif total_combined >= 150:
-        tier = "🔥 Puzzle Master"
-    elif total_combined >= 40:
-        tier = "⚡ Word Hunter"
-    else:
-        tier = "🌱 Arcade Rookie"
-
     text = (
-        f"👤 <b>Player Profile — {safe_name}</b>\n"
-        f"🎖 <b>Rank Title:</b> <code>{tier}</code>\n\n"
+        f"👤 <b>Player Profile — {safe_name}</b>\n\n"
+        f"<blockquote>"
+        f"🟩 <b>WordSeek Stats (5L)</b>\n"
+        f"• <b>Score:</b> <code>{seek_score:,} pts</code> ({seek_rank_str})\n"
+        f"• <b>Daily Streak:</b> <code>{curr_streak} days</code> (Best: <code>{high_streak} days</code>)"
+        f"</blockquote>\n"
         f"<blockquote>"
         f"🧩 <b>Word Grid Arcade</b>\n"
         f"• <b>Score:</b> <code>{grid_score:,} pts</code> ({grid_rank_str})\n"
-        f"• <b>Words Found:</b> <code>{words_found:,}</code>  |  <b>Best:</b> <code>R{best_round}</code>"
-        f"</blockquote>\n"
-        f"<blockquote>"
-        f"🟩 <b>WordSeek (Wordle)</b>\n"
-        f"• <b>Score (5L):</b> <code>{seek_score:,} pts</code> ({seek_rank_str})\n"
-        f"• <b>Daily Streak:</b> <code>{curr_streak}d</code> (Best: <code>{high_streak}d</code>)"
+        f"• <b>Words Found:</b> <code>{words_found:,}</code>  |  <b>Best:</b> <code>Round {best_round}</code>"
         f"</blockquote>"
     )
 
     rows = [
         [
             InlineKeyboardButton("🔄 Refresh", callback_data="profile:refresh"),
-            InlineKeyboardButton("🏆 Ranks", callback_data="nav:lb"),
+            InlineKeyboardButton("🏆 Ranks", callback_data="wslb:global:all:5"),
         ]
     ]
     if show_back:
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="nav:home")])
 
     return text, InlineKeyboardMarkup(rows)
+
+
+# ============================================================================
+# BOT API 10.3 STYLED LEADERBOARD & SCORE KEYBOARDS (style="primary" / "success")
+# ============================================================================
+def build_seek_filter_keyboard_dict(
+    search_key: str,
+    time_key: str,
+    word_length: int,
+    prefix: str = "wslb",
+    include_game_switch: bool = False,
+    show_back: bool = False,
+) -> dict:
+    """
+    Ported from WordSeek-master's `generate-leaderboard-keyboard.ts`.
+    Sets `"style": "primary"` (Blue) on active filter buttons and `"style": "success"` (Green) on support!
+    """
+    rows = []
+
+    if include_game_switch:
+        rows.append(
+            [
+                {
+                    "text": "« 🟩 WordSeek »",
+                    "callback_data": f"{prefix}:{search_key}:{time_key}:{word_length}",
+                    "style": "primary",
+                },
+                {
+                    "text": "🧩 Word Grid",
+                    "callback_data": "lb:users",
+                },
+            ]
+        )
+
+    # Scope row: Global | 🔄 | This chat
+    g_btn = {
+        "text": _fmt_tab("Global", search_key == "global"),
+        "callback_data": f"{prefix}:global:{time_key}:{word_length}",
+    }
+    if search_key == "global":
+        g_btn["style"] = "primary"
+
+    c_btn = {
+        "text": _fmt_tab("This chat", search_key == "group"),
+        "callback_data": f"{prefix}:group:{time_key}:{word_length}",
+    }
+    if search_key == "group":
+        c_btn["style"] = "primary"
+
+    rows.append(
+        [
+            g_btn,
+            {
+                "text": "🔄",
+                "callback_data": f"{prefix}:{search_key}:{time_key}:{word_length}:r",
+            },
+            c_btn,
+        ]
+    )
+
+    # Time period rows (3 per row, just like generate-leaderboard-keyboard.ts)
+    time_items = [
+        ("today", "Today"),
+        ("week", "This week"),
+        ("month", "This month"),
+        ("year", "This year"),
+        ("all", "All time"),
+    ]
+    t_row = []
+    for t_k, t_label in time_items:
+        b = {
+            "text": _fmt_tab(t_label, time_key == t_k),
+            "callback_data": f"{prefix}:{search_key}:{t_k}:{word_length}",
+        }
+        if time_key == t_k:
+            b["style"] = "primary"
+        t_row.append(b)
+        if len(t_row) == 3:
+            rows.append(t_row)
+            t_row = []
+    if t_row:
+        rows.append(t_row)
+
+    # Word length row: 4 letters | 5 letters | 6 letters
+    len_row = []
+    for ln in (4, 5, 6):
+        b = {
+            "text": _fmt_tab(f"{ln} letters", word_length == ln),
+            "callback_data": f"{prefix}:{search_key}:{time_key}:{ln}",
+        }
+        if word_length == ln:
+            b["style"] = "primary"
+        len_row.append(b)
+    rows.append(len_row)
+
+    rows.append(
+        [
+            {"text": "📢 Updates", "url": UPDATE_CHANNEL},
+            {"text": "💬 Discussion", "url": SUPPORT_GROUP, "style": "success"},
+        ]
+    )
+
+    if show_back:
+        rows.append([{"text": "⬅️ Back", "callback_data": "nav:home"}])
+
+    return {"inline_keyboard": rows}
 
 
 def build_seek_score_view(
@@ -414,134 +655,39 @@ def build_seek_score_view(
     search_key: str = "global",
     time_key: str = "all",
     word_length: int = 5,
-) -> tuple[str, InlineKeyboardMarkup]:
+) -> tuple[str, InlineKeyboardMarkup, dict]:
     """
-    Ported from WordSeek's `formatUserScoreMessage` + `generateLeaderboardKeyboard`
-    with compact button labels.
+    Ported from WordSeek's `formatUserScoreMessage` + `generateLeaderboardKeyboard`.
+    Returns `(text_html, pyrogram_markup, bot_api_styled_markup_dict)`.
     """
     safe_name = normalize_fancy_telegram_name((score_data or {}).get("name") or target_name)
-    scope_label = "globally" if search_key == "global" else "in this chat"
-    time_labels = {
-        "today": "Today",
-        "week": "This Week",
-        "month": "This Month",
-        "year": "This Year",
-        "all": "All Time",
-    }
-    period_label = time_labels.get(time_key, "All Time")
+    uname = (score_data or {}).get("username")
+    mention = f'<a href="https://t.me/{uname}">{safe_name}</a>' if uname else safe_name
+    scope_text = "globally" if search_key == "global" else "in this chat"
 
     if not score_data or (score_data.get("total_score", 0) == 0 and score_data.get("highest_streak", 0) == 0):
         text = (
-            f"<blockquote>📊 <b>WordSeek Score ({word_length}L • {period_label})</b></blockquote>\n"
-            f"<b>{safe_name}</b> has no recorded {word_length}-letter WordSeek scores {scope_label} for <b>{period_label}</b> yet.\n\n"
-            f"<i>Start a round with <code>/new{word_length}</code> or play <code>/daily</code>!</i>"
+            f"<blockquote><strong>🏆 Regular WordSeek Scores ({word_length}L)</strong></blockquote>\n"
+            f"<b>{mention}</b> has no scores recorded {scope_text} for this period yet.\n\n"
+            f"<i>Start a game with <code>/new{word_length}</code> or play <code>/daily</code>!</i>"
         )
     else:
         tot = score_data.get("total_score", 0)
         rnk = score_data.get("rank", 0)
         c_str = score_data.get("current_streak", 0)
         h_str = score_data.get("highest_streak", 0)
-        rnk_txt = f"<b>#{rnk:,}</b>" if rnk > 0 else "<b>Unranked</b>"
         text = (
-            f"<blockquote>🏆 <b>WordSeek Scores ({word_length}L • {period_label})</b></blockquote>\n"
-            f"<b>{safe_name}</b> has a total score of <b>{tot:,} pts</b> {scope_label}.\n"
-            f"Rank: {rnk_txt}\n\n"
-            f"<blockquote>🔥 <b>Daily WordSeek Streak</b>\n"
-            f"• <b>Current Streak:</b> <code>{c_str} days</code>\n"
-            f"• <b>Highest Streak:</b> <code>{h_str} days</code></blockquote>"
+            f"<blockquote><strong>🏆 Regular WordSeek Scores</strong></blockquote>\n"
+            f"<b>{mention}</b> has a total score of <b>{tot:,}</b> {scope_text}.\n"
+            f"Their rank is <b>#{rnk:,}</b>.\n\n"
+            f"<blockquote><strong>🔥 Daily WordSeek Stats</strong></blockquote>\n"
+            f"<b>Current Streak:</b> {c_str} days\n"
+            f"<b>Highest Streak:</b> {h_str} days"
         )
 
     prefix = f"wsscore:{target_id}"
-    markup = build_seek_filter_keyboard(search_key, time_key, word_length, prefix=prefix)
-    return text, markup
-
-
-def build_seek_filter_keyboard(
-    search_key: str,
-    time_key: str,
-    word_length: int,
-    prefix: str = "wslb",
-    include_game_switch: bool = False,
-    show_back: bool = False,
-) -> InlineKeyboardMarkup:
-    """Compact filter keyboard for WordSeek Leaderboards and `/score` views."""
-    rows = []
-    if include_game_switch:
-        rows.append(
-            [
-                InlineKeyboardButton("🟩 WordSeek ✅", callback_data=f"{prefix}:{search_key}:{time_key}:{word_length}"),
-                InlineKeyboardButton("🧩 Word Grid", callback_data="lb:users"),
-            ]
-        )
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                _fmt_tab("Global", search_key == "global"),
-                callback_data=f"{prefix}:global:{time_key}:{word_length}",
-            ),
-            InlineKeyboardButton(
-                "🔄",
-                callback_data=f"{prefix}:{search_key}:{time_key}:{word_length}:r",
-            ),
-            InlineKeyboardButton(
-                _fmt_tab("Chat", search_key == "group"),
-                callback_data=f"{prefix}:group:{time_key}:{word_length}",
-            ),
-        ]
-    )
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                _fmt_tab("Today", time_key == "today"),
-                callback_data=f"{prefix}:{search_key}:today:{word_length}",
-            ),
-            InlineKeyboardButton(
-                _fmt_tab("Week", time_key == "week"),
-                callback_data=f"{prefix}:{search_key}:week:{word_length}",
-            ),
-            InlineKeyboardButton(
-                _fmt_tab("Month", time_key == "month"),
-                callback_data=f"{prefix}:{search_key}:month:{word_length}",
-            ),
-        ]
-    )
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                _fmt_tab("Year", time_key == "year"),
-                callback_data=f"{prefix}:{search_key}:year:{word_length}",
-            ),
-            InlineKeyboardButton(
-                _fmt_tab("All Time", time_key == "all"),
-                callback_data=f"{prefix}:{search_key}:all:{word_length}",
-            ),
-        ]
-    )
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                _fmt_tab("4L", word_length == 4),
-                callback_data=f"{prefix}:{search_key}:{time_key}:4",
-            ),
-            InlineKeyboardButton(
-                _fmt_tab("5L", word_length == 5),
-                callback_data=f"{prefix}:{search_key}:{time_key}:5",
-            ),
-            InlineKeyboardButton(
-                _fmt_tab("6L", word_length == 6),
-                callback_data=f"{prefix}:{search_key}:{time_key}:6",
-            ),
-        ]
-    )
-
-    if show_back:
-        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="nav:home")])
-
-    return InlineKeyboardMarkup(rows)
+    kb_dict = build_seek_filter_keyboard_dict(search_key, time_key, word_length, prefix=prefix)
+    return text, markup_dict_to_pyrogram(kb_dict), kb_dict
 
 
 def build_seek_leaderboard_view(
@@ -550,28 +696,40 @@ def build_seek_leaderboard_view(
     time_key: str = "all",
     word_length: int = 5,
     show_back: bool = False,
-) -> tuple[str, InlineKeyboardMarkup]:
-    """Formats WordSeek Leaderboard matching `format-leaderboard-message.ts` with Dual Game tabs."""
-    scope_title = "Global" if search_key == "global" else "Chat"
-    time_map = {"today": "Today", "week": "Week", "month": "Month", "year": "Year", "all": "All Time"}
-    t_label = time_map.get(time_key, "All Time")
+) -> tuple[str, InlineKeyboardMarkup, dict]:
+    """
+    Ported from WordSeek's `formatLeaderboardMessage` + `generateLeaderboardKeyboard`.
+    Returns `(text_html, pyrogram_markup, bot_api_styled_markup_dict)`.
+    """
+    scope_title = "Global" if search_key == "global" else "Group"
+    header = f"<blockquote>🏆 {scope_title} Leaderboard 🏆</blockquote>\n\n"
 
-    header = f"<blockquote>🏆 <b>WordSeek {scope_title} Leaderboard ({word_length}L • {t_label})</b></blockquote>\n\n"
     if not entries:
-        body = f"<blockquote>No {word_length}-letter WordSeek scores recorded for this filter yet!\nStart playing with <code>/new{word_length}</code>.</blockquote>"
+        body = f"<blockquote>No scores recorded yet! Start a game with <code>/new{word_length}</code>.</blockquote>"
     else:
-        medals = {0: "🥇", 1: "🥈", 2: "🥉"}
-        lines = []
-        for idx, row in enumerate(entries[:15]):
-            badge = medals.get(idx, f"<b>{idx + 1}.</b>")
-            name = normalize_fancy_telegram_name(row.get("name", "Player"), max_len=22)
-            uid = row.get("user_id", 0)
-            pts = row.get("total_score", 0)
-            link = f'<a href="tg://user?id={uid}">{name}</a>' if uid else f"<b>{name}</b>"
-            lines.append(f"{badge} {link} — <code>{pts:,} pts</code>")
-        body = "<blockquote>" + "\n".join(lines) + "</blockquote>"
+        blocks: list[list[str]] = []
+        for index, entry in enumerate(entries[:20]):
+            rank_icon = ["🥇", "🥈", "🥉"][index] if index < 3 else "🔅"
+            name = normalize_fancy_telegram_name(entry.get("name", "Player"), max_len=24)
+            uname = entry.get("username")
+            uid = entry.get("user_id", 0)
+            pts = entry.get("total_score", 0)
 
-    markup = build_seek_filter_keyboard(
+            if uname:
+                user_link = f'<a href="https://t.me/{uname}">{name}</a>'
+            elif uid:
+                user_link = f'<a href="tg://user?id={uid}">{name}</a>'
+            else:
+                user_link = name
+
+            line = f"{rank_icon}{user_link} - {pts:,} pts"
+            if index == 0 or index == 3 or (index > 3 and (index - 3) % 10 == 0):
+                blocks.append([])
+            blocks[-1].append(line)
+
+        body = "\n".join(f"<blockquote>{chr(10).join(b)}</blockquote>" for b in blocks)
+
+    kb_dict = build_seek_filter_keyboard_dict(
         search_key=search_key,
         time_key=time_key,
         word_length=word_length,
@@ -579,7 +737,7 @@ def build_seek_leaderboard_view(
         include_game_switch=True,
         show_back=show_back,
     )
-    return header + body, markup
+    return header + body, markup_dict_to_pyrogram(kb_dict), kb_dict
 
 
 def build_leaderboard_view(
@@ -597,11 +755,11 @@ def build_leaderboard_view(
         else:
             lines = []
             for idx, g in enumerate(entries[:10]):
-                badge = medals.get(idx, f"<b>{idx + 1}.</b>")
+                badge = medals.get(idx, "🔅")
                 title = normalize_fancy_telegram_name(g.get("title", "Group"), max_len=24)
                 score = g.get("score", 0)
                 best_r = g.get("best_round", 1)
-                lines.append(f"{badge} <b>{title}</b> — <code>{score:,} pts</code> <i>(R{best_r})</i>")
+                lines.append(f"{badge} <b>{title}</b> - {score:,} pts <i>(R{best_r})</i>")
             body = "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
         tabs = [
@@ -616,12 +774,12 @@ def build_leaderboard_view(
         else:
             lines = []
             for idx, u in enumerate(entries[:10]):
-                badge = medals.get(idx, f"<b>{idx + 1}.</b>")
+                badge = medals.get(idx, "🔅")
                 name = normalize_fancy_telegram_name(u.get("first_name", "Player"), max_len=22)
                 uid = u.get("user_id", 0)
                 score = u.get("score", 0)
                 user_link = f'<a href="tg://user?id={uid}">{name}</a>' if uid else f"<b>{name}</b>"
-                lines.append(f"{badge} {user_link} — <code>{score:,} pts</code>")
+                lines.append(f"{badge} {user_link} - {score:,} pts")
             body = "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
         tabs = [
@@ -633,7 +791,7 @@ def build_leaderboard_view(
     rows = [
         [
             InlineKeyboardButton("🟩 WordSeek", callback_data="wslb:global:all:5"),
-            InlineKeyboardButton("🧩 Word Grid ✅", callback_data="lb:users"),
+            InlineKeyboardButton("« 🧩 Word Grid »", callback_data="lb:users"),
         ],
         tabs,
         [
@@ -654,7 +812,6 @@ def build_admin_view(
     active_grid_games: int = 0,
     active_seek_games: int = 0,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Single Source of Truth view builder for `/panel`, `/admin`, and `admin:*` callbacks."""
     if section == "stats":
         text = (
             "📊 <b>Bot Live Statistics</b>\n\n"

@@ -14,7 +14,28 @@ logger = logging.getLogger("WordGridBot.WordSeekEngine")
 DATA_DIR = os.path.join(os.path.dirname(__file__), "wordseek_data")
 ROBOTO_FONT_PATH = os.path.join(os.path.dirname(__file__), "roboto.ttf")
 
-# Fancy bold sans-serif character map ported directly from WordSeek's to-fancy-text.ts
+# Zero-width characters used by WordSeek so identical letter buttons in a row are uniquely rendered
+ZERO_WIDTH = [
+    "\u200B",  # zero width space
+    "\u200C",  # zero width non-joiner
+    "\u200D",  # zero width joiner
+    "\u2060",  # word joiner
+    "\uFEFF",  # zero width no-break space
+]
+
+# Bot API 10.3 RichTextButton / RichMessageButton styles
+BUTTON_STYLE: dict[str, str | None] = {
+    "correct": "success",  # Green button (right letter, right spot)
+    "present": None,       # Default theme button (right letter, wrong spot)
+    "absent": "danger",    # Red button (letter not in word)
+}
+
+MODE_LABEL: dict[int, str] = {
+    4: "4-letter mode",
+    5: "5-letter mode",
+    6: "6-letter mode",
+}
+
 FANCY_MAP = {
     "0": "𝟬", "1": "𝟭", "2": "𝟮", "3": "𝟯", "4": "𝟰",
     "5": "𝟱", "6": "𝟲", "7": "𝟳", "8": "𝟴", "9": "𝟵",
@@ -33,6 +54,11 @@ FANCY_MAP = {
 
 def to_fancy_text(text: str) -> str:
     return "".join(FANCY_MAP.get(ch, ch) for ch in text)
+
+
+def zero_width_noise(min_count: int = 1, max_count: int = 6) -> str:
+    count = random.randint(min_count, max_count)
+    return "".join(random.choice(ZERO_WIDTH) for _ in range(count))
 
 
 def _load_json_list(filename: str, fallback_len: int) -> list[str]:
@@ -76,7 +102,6 @@ ALL_VALID_WORDS: dict[int, set[str]] = {
 DAILY_WORD_LIST: list[str] = _load_json_list("daily-word-lists.json", 5) or COMMON_WORDS[5]
 COMMON_WORDS_DETAILS: dict = _load_common_words_dict()
 
-# Per-chat word history so the same word doesn't repeat in a chat (ported from WordSelector)
 _CHAT_WORD_HISTORY: dict[tuple[int, int], deque[str]] = {}
 
 
@@ -113,7 +138,7 @@ def is_valid_seek_guess(word: str, word_length: int = 5) -> bool:
 def evaluate_guess(guess: str, solution: str) -> list[str]:
     """
     Evaluates a WordSeek guess against `solution`.
-    Returns a list of states: `'correct'` (🟩), `'present'` (🟨), or `'absent'` (🟥/⬛).
+    Returns a list of states: `'correct'` (green), `'present'` (default/yellow), or `'absent'` (red).
     """
     g = guess.upper()
     s = solution.upper()
@@ -138,8 +163,37 @@ def evaluate_guess(guess: str, solution: str) -> list[str]:
     return result
 
 
+def render_guess_row(guess: str, solution: str) -> str:
+    """
+    Exact port of `renderGuessRow` from WordSeek's `src/handlers/on-message.tsx`!
+    Produces Bot API 10.3 `<tg-button>` (`RichTextButton`) elements inside `<p>` with
+    `style="success"` (Green), default (no style), and `style="danger"` (Red).
+    """
+    states = evaluate_guess(guess, solution)
+    buttons = []
+    for idx, letter in enumerate(guess.upper()):
+        state = states[idx]
+        style = BUTTON_STYLE.get(state)
+        style_attr = f' style="{style}"' if style else ""
+        label = f"{zero_width_noise()}{letter}{zero_width_noise()}"
+        buttons.append(
+            f'<tg-button type="callback_data"{style_attr} data="wh:{state}:{letter}">{label}</tg-button>'
+        )
+    return f"<p>{''.join(buttons)}</p>"
+
+
+def build_rich_feedback(guesses: list[str], solution: str, max_guesses: int = 30) -> str:
+    """
+    Exact port of `buildRichFeedback` from WordSeek's `src/handlers/on-message.tsx`!
+    Returns Bot API 10.3 RichMessage HTML where ONLY colored `<tg-button>` rows are shown.
+    """
+    mode_label = MODE_LABEL.get(len(solution), f"{len(solution)}-letter mode")
+    rows = "".join(render_guess_row(g, solution) for g in guesses)
+    return f"<h3>{mode_label}</h3><p><i>{len(guesses)}/{max_guesses} guesses</i></p>{rows}"
+
+
 def format_guess_emoji_row(guess: str, solution: str) -> str:
-    """Formats a single guess line with colored squares and bold sans-serif letters."""
+    """Fallback emoji row if a custom Bot API root doesn't support RichMessage."""
     states = evaluate_guess(guess, solution)
     emoji_map = {"correct": "🟩", "present": "🟨", "absent": "🟥"}
     squares = "".join(emoji_map[st] for st in states)
@@ -156,19 +210,18 @@ def format_word_details(word: str, custom_details: dict | None = None) -> str:
     phonetic = details.get("phonetic") or details.get("pronunciation")
     sentence = details.get("sentence") or details.get("example")
 
-    parts = [f"🎯 <b>Correct Word:</b> <code>{html.escape(word.upper())}</code>"]
+    parts = [f"<strong>Correct Word: {html.escape(word)}</strong>"]
     if phonetic:
-        parts.append(f"🗣 <b>{html.escape(word.capitalize())}</b> <code>{html.escape(str(phonetic))}</code>")
+        parts.append(f"<strong>{html.escape(word.capitalize())}</strong> <code>{html.escape(str(phonetic))}</code>")
     if meaning:
-        parts.append(f"📖 <b>Meaning:</b> {html.escape(str(meaning))}")
+        parts.append(f"<strong>Meaning</strong>: {html.escape(str(meaning))}")
     if sentence:
-        parts.append(f"💬 <b>Example:</b> <i>{html.escape(str(sentence))}</i>")
+        parts.append(f"<strong>Example</strong>: {html.escape(str(sentence))}")
 
     return "<blockquote>" + "\n".join(parts) + "</blockquote>"
 
 
 def generate_wordle_share_text(day_number: int, guesses: list[str], solution: str) -> str:
-    """Ported from WordSeek's generateWordleShareText for Daily Mode inline sharing."""
     attempt_line = f"{day_number} {len(guesses)}/6"
     lines = []
     for g in guesses:
@@ -190,11 +243,7 @@ def _get_wordle_font(size: int):
 
 
 def render_wordseek_image(guesses: list[str], solution: str, max_rows: int = 6) -> BytesIO:
-    """
-    Pillow port of WordSeek's `generateWordleImage` (Satori/Sharp in WordSeek-master).
-    Draws the authentic dark-mode Wordle tile grid (`#121213` bg, `#538d4e` green,
-    `#b59f3b` yellow, `#3a3a3c` absent gray, `#565758` empty outline).
-    """
+    """Pillow port of WordSeek's `generateWordleImage` for `/daily` mode."""
     word_len = len(solution)
     total_rows = max(max_rows, len(guesses))
 
@@ -205,15 +254,15 @@ def render_wordseek_image(guesses: list[str], solution: str, max_rows: int = 6) 
     width = padding * 2 + word_len * tile_size + (word_len - 1) * gap
     height = padding * 2 + total_rows * tile_size + (total_rows - 1) * gap
 
-    img = Image.new("RGB", (width, height), color=(18, 18, 19))  # #121213
+    img = Image.new("RGB", (width, height), color=(18, 18, 19))
     draw = ImageDraw.Draw(img)
     font = _get_wordle_font(30)
 
     color_map = {
-        "correct": (83, 141, 78),   # #538d4e
-        "present": (181, 159, 59),  # #b59f3b
-        "absent": (58, 58, 60),     # #3a3a3c
-        "empty": (18, 18, 19),      # #121213
+        "correct": (83, 141, 78),
+        "present": (181, 159, 59),
+        "absent": (58, 58, 60),
+        "empty": (18, 18, 19),
     }
 
     for row_idx in range(total_rows):

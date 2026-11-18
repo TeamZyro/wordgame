@@ -1,4 +1,3 @@
-import html
 import time
 import asyncio
 import logging
@@ -9,7 +8,6 @@ from bot.config import (
     SUDO_USERS,
     CMD_COOLDOWN,
     GAME_START_COOLDOWN,
-    HINT_COOLDOWN,
     CALLBACK_COOLDOWN,
     GUESS_COOLDOWN,
     WORDSEEK_MAX_GUESSES,
@@ -20,10 +18,16 @@ from bot.utils.cooldown import (
     get_user_lock,
     safe_tg_call,
 )
+from bot.utils.rich_api import (
+    send_rich_message,
+    send_styled_message,
+    edit_styled_message,
+)
 from bot.utils.wordseek_engine import (
     select_random_seek_word,
     is_valid_seek_guess,
     evaluate_guess,
+    build_rich_feedback,
     format_guess_emoji_row,
     format_word_details,
     generate_wordle_share_text,
@@ -33,7 +37,6 @@ from bot.utils.wordseek_engine import (
 )
 from bot.utils.views import (
     normalize_fancy_telegram_name,
-    build_wordseek_board_view,
     build_seek_score_view,
     build_seek_leaderboard_view,
 )
@@ -76,7 +79,6 @@ def _get_topic_id(message: Message) -> str:
 
 
 async def _check_allowed_topic(message: Message) -> tuple[bool, list[int]]:
-    """Checks if the chat has forum topic restrictions and returns `(is_allowed, allowed_lengths)`."""
     if message.chat.type == ChatType.PRIVATE:
         return True, [5, 4, 6]
     topics = await get_game_topics(message.chat.id)
@@ -120,12 +122,11 @@ async def _start_wordseek_game(
     if not topic_ok:
         await safe_tg_call(
             message.reply_text,
-            "⚠️ <b>Games are restricted to designated game topics in this group.</b>",
+            "This topic is not set for the game.",
             quote=True,
         )
         return
 
-    # Determine requested word length
     word_length = forced_length
     if word_length is None:
         args = message.command[1:] if message.command and len(message.command) > 1 else []
@@ -138,24 +139,20 @@ async def _start_wordseek_game(
         allowed_str = ", ".join(str(x) for x in allowed_lengths)
         await safe_tg_call(
             message.reply_text,
-            f"⚠️ <b>Only these word lengths are allowed here:</b> <code>{allowed_str}</code>",
+            f"Only these lengths are allowed in this topic: {allowed_str}.",
             quote=True,
         )
         return
 
     allowed_cd, wait_s = check_cooldown(f"seekstart:{chat_id}:{topic_id}", GAME_START_COOLDOWN)
     if not allowed_cd:
-        await safe_tg_call(
-            message.reply_text,
-            f"⏳ <b>Wait {wait_s}s before starting a new WordSeek game!</b>",
-        )
         return
 
     async with get_chat_lock(chat_id):
         if session_key in active_seek_games:
             await safe_tg_call(
                 message.reply_text,
-                "⚠️ <b>A WordSeek game is already in progress in this chat!</b>\nUse <code>/end</code> to end the current game.",
+                "There is already a game in progress in this chat. Use /end to end the current game.",
                 quote=True,
             )
             return
@@ -175,27 +172,12 @@ async def _start_wordseek_game(
             "guesses": [],
             "guessed_set": set(),
             "voters": set(),
-            "hint_revealed": set(),
             "created_at": time.monotonic(),
         }
 
-    markup = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("💡 Hint", callback_data="ws:hint"),
-                InlineKeyboardButton("🛑 End", callback_data="ws:end"),
-            ]
-        ]
-    )
     await safe_tg_call(
         message.reply_text,
-        (
-            f"🟩 <b>WordSeek Started! ({word_length}-Letter Mode)</b>\n\n"
-            f"<blockquote>Guess the hidden <b>{word_length}-letter word</b> by typing it in chat!\n"
-            f"• Max Attempts: <code>{WORDSEEK_MAX_GUESSES}</code>\n"
-            f"• Starter: <b>{normalize_fancy_telegram_name(user.first_name)}</b></blockquote>"
-        ),
-        reply_markup=markup,
+        f"Game started! Guess the {word_length}-letter word!",
     )
 
 
@@ -221,26 +203,16 @@ async def _finish_and_reveal_seek(message_or_chat, client: Client, game: dict, r
 
     w = game["word"]
     wlen = game["word_length"]
-    details_block = format_word_details(w)
 
     text = (
-        f"<blockquote>🎮 <b>WordSeek Ended</b></blockquote>\n"
-        f"{details_block}\n"
+        f"<blockquote>🎮 <b>Game Ended</b>\nCorrect Word: <b>{html.escape(w)}</b></blockquote>\n"
         f"<blockquote>{reason_html + chr(10) if reason_html else ''}"
-        f"Start a new game with <code>/new{wlen}</code></blockquote>"
-    )
-    markup = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(f"▶️ New {wlen}L", callback_data=f"ws:new:{wlen}"),
-                InlineKeyboardButton("🏆 Ranks", callback_data=f"wslb:global:all:{wlen}"),
-            ]
-        ]
+        f"Start a new game with /new{wlen}</blockquote>"
     )
     if isinstance(message_or_chat, Message):
-        await safe_tg_call(message_or_chat.reply_text, text, reply_markup=markup)
+        await safe_tg_call(message_or_chat.reply_text, text)
     else:
-        await safe_tg_call(client.send_message, int(message_or_chat), text, reply_markup=markup)
+        await safe_tg_call(client.send_message, int(message_or_chat), text)
 
 
 @Client.on_message(filters.command(["end", "endseek"]))
@@ -258,7 +230,7 @@ async def end_wordseek_command(client: Client, message: Message):
         if not game:
             await safe_tg_call(
                 message.reply_text,
-                "ℹ️ <b>There is no WordSeek game in progress.</b>\nStart one with <code>/new</code>!",
+                "There is no game in progress.",
                 quote=True,
             )
             return
@@ -275,32 +247,33 @@ async def end_wordseek_command(client: Client, message: Message):
             if is_private:
                 reason = ""
             elif is_starter:
-                reason = f"<b>Ended by game starter:</b> {user_link}"
+                reason = f"<b>Ended by game starter: </b>{user_link}"
             elif is_sys_admin:
-                reason = f"<b>Ended by system admin:</b> {user_link}"
+                reason = f"<b>Ended by system administrator: </b>{user_link}"
             elif is_grp_admin:
-                reason = f"<b>Ended by group admin:</b> {user_link}"
+                reason = f"<b>Ended by group administrator: </b>{user_link}"
             else:
-                reason = f"<b>Ended by authorized user:</b> {user_link}"
+                reason = f"<b>Ended by authorized user: </b>{user_link}"
 
             await _finish_and_reveal_seek(message, client, game, reason)
             return
 
-        # Initiate or update 3-player vote to end
         voters: set[int] = game.setdefault("voters", set())
+        if len(voters) > 0:
+            await safe_tg_call(
+                message.reply_text,
+                "⏳ A vote to end the game is already in progress. Please wait for it to complete.",
+            )
+            return
+
         voters.add(user.id)
         count = len(voters)
-
-        if count >= 3:
-            reason = f"<b>Ended by player vote ({count}/3)</b>"
-            await _finish_and_reveal_seek(message, client, game, reason)
-            return
 
     markup = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    f"✅ Vote ({count}/3)",
+                    f"✅ Vote to End ({count}/3)",
                     callback_data=f"ws:vote_end:{topic_id}",
                 )
             ]
@@ -309,11 +282,11 @@ async def end_wordseek_command(client: Client, message: Message):
     await safe_tg_call(
         message.reply_text,
         (
-            f"🗳 <b>Vote to End WordSeek</b>\n\n"
-            f"<blockquote>{user_link} wants to end the current game.\n"
-            f"• <b>Votes Needed:</b> <code>3</code>\n"
-            f"• <b>Current Votes:</b> <code>{count}/3</code></blockquote>\n"
-            f"<i>Tap below to vote for ending the game.</i>"
+            f"<b>🗳️ Vote to End Game</b>\n\n"
+            f"{user_link} wants to end the game.\n\n"
+            f"<b>Votes needed: 3 out of remaining players</b>\n"
+            f"<b>Current votes: {count}/3</b>\n\n"
+            f"React with the button below to vote for ending the game."
         ),
         reply_markup=markup,
     )
@@ -337,22 +310,14 @@ async def _start_daily_wordseek(client: Client, user, reply_target: Message):
         if guesses[-1].lower() == target_w:
             await safe_tg_call(
                 reply_target.reply_text,
-                (
-                    f"✅ <b>You've already completed today's Daily WordSeek!</b>\n"
-                    f"<blockquote>Solved in <b>{len(guesses)}/6</b> {'try' if len(guesses) == 1 else 'tries'}.\n"
-                    f"Come back after <b>6:00 AM</b> tomorrow for a new challenge!</blockquote>"
-                ),
+                f"You've already completed today's WordSeek! You got it in {len(guesses)} {'try' if len(guesses) == 1 else 'tries'}. Come back after 6:00 AM tomorrow for a new challenge!",
             )
             return
 
         if len(guesses) >= 6:
             await safe_tg_call(
                 reply_target.reply_text,
-                (
-                    f"❌ <b>You've used all 6 attempts for today's Daily WordSeek!</b>\n"
-                    f"{format_word_details(target_w, daily_word)}\n"
-                    f"<i>Come back after 6:00 AM tomorrow for a new challenge!</i>"
-                ),
+                f"You've already used all 6 attempts for today's WordSeek. The word was: {target_w.upper()}\n\nCome back after 6:00 AM tomorrow for a new challenge!",
             )
             return
 
@@ -369,21 +334,12 @@ async def _start_daily_wordseek(client: Client, user, reply_target: Message):
         await safe_tg_call(
             reply_target.reply_photo,
             photo=img_io,
-            caption=(
-                f"🎯 <b>Daily WordSeek Resumed!</b>\n"
-                f"You have <b>{attempts_left}</b> {'attempt' if attempts_left == 1 else 'attempts'} left. Type a 5-letter word!"
-            ),
+            caption=f"Welcome back! You have {attempts_left} {'attempt' if attempts_left == 1 else 'attempts'} left for today's WordSeek. Keep guessing!",
         )
     else:
         await safe_tg_call(
             reply_target.reply_text,
-            (
-                "🎯 <b>WordSeek of the Day Started!</b>\n\n"
-                "<blockquote>• Guess today's <b>5-letter word</b> in <b>6 attempts</b>.\n"
-                "• Each guess generates a visual Wordle tile board.\n"
-                "• Use <code>/pausedaily</code> anytime to switch to regular <code>/new</code> mode.</blockquote>\n"
-                "💬 <i>Type your first 5-letter guess now!</i>"
-            ),
+            "🎯 WordSeek of the Day started! Guess the 5-letter word. You have 6 attempts. Good luck!",
         )
 
 
@@ -395,14 +351,9 @@ async def daily_wordseek_commands(client: Client, message: Message):
 
     cmd = message.command[0].lower()
     if message.chat.type != ChatType.PRIVATE:
-        uname = getattr(client.me, "username", None) or "WordGridGameBot"
-        markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🎯 Play Daily in DM", url=f"https://t.me/{uname}?start=daily")]]
-        )
         await safe_tg_call(
             message.reply_text,
-            "🎯 <b>Daily WordSeek is only available in Private Chat (DM)!</b>",
-            reply_markup=markup,
+            "Daily WordSeek can only be played in private chat (DM)!",
             quote=True,
         )
         return
@@ -411,13 +362,13 @@ async def daily_wordseek_commands(client: Client, message: Message):
         if user.id not in active_daily_sessions:
             await safe_tg_call(
                 message.reply_text,
-                "ℹ️ <b>You don't have an active Daily WordSeek session to pause.</b>",
+                "You don't have an active WordSeek of the Day game to pause.",
             )
             return
         active_daily_sessions.pop(user.id, None)
         await safe_tg_call(
             message.reply_text,
-            "✅ <b>Daily WordSeek paused!</b>\nYou can now play regular WordSeek with <code>/new</code>, or resume anytime with <code>/daily</code>.",
+            "✅ Your WordSeek of the Day game has been paused. You can now play regular WordSeek.\n\nTo play today's WordSeek again, use /daily (your previous attempts will still count).",
         )
         return
 
@@ -425,7 +376,7 @@ async def daily_wordseek_commands(client: Client, message: Message):
     if session_key in active_seek_games:
         await safe_tg_call(
             message.reply_text,
-            "⚠️ <b>You have a regular WordSeek game running!</b>\nUse <code>/end</code> first before starting <code>/daily</code>.",
+            "Please end your current regular game with /end before starting /daily.",
         )
         return
 
@@ -433,7 +384,7 @@ async def daily_wordseek_commands(client: Client, message: Message):
 
 
 # ============================================================================
-# SCORE & MYSCORE COMMANDS (/score, /myscore)
+# SCORE & MYSCORE COMMANDS (/score, /myscore) WITH BOT API 10.3 BUTTON STYLES
 # ============================================================================
 def _parse_score_args(args: list[str], is_private: bool) -> tuple[str | None, str, str, int]:
     target = None
@@ -465,6 +416,14 @@ async def score_command(client: Client, message: Message):
     if not allowed:
         return
 
+    if message.command[0].lower() == "myscore":
+        await safe_tg_call(
+            message.reply_text,
+            "Please switch to /score command. It's a replacement for /myscore command",
+            quote=True,
+        )
+        return
+
     is_private = message.chat.type == ChatType.PRIVATE
     args = message.command[1:] if message.command and len(message.command) > 1 else []
     target_str, s_key, t_key, w_len = _parse_score_args(args, is_private)
@@ -480,7 +439,7 @@ async def score_command(client: Client, message: Message):
     elif target_str:
         found = await find_user_by_username_or_id(target_str)
         if not found:
-            await safe_tg_call(message.reply_text, "❌ <b>User not found in database.</b>", quote=True)
+            await safe_tg_call(message.reply_text, "User not found.", quote=True)
             return
         target_id = int(found["user_id"])
         target_name = found.get("first_name", "Player")
@@ -492,7 +451,7 @@ async def score_command(client: Client, message: Message):
         time_key=t_key,
         word_length=w_len,
     )
-    text, markup = build_seek_score_view(
+    text, pyro_markup, styled_kb_dict = build_seek_score_view(
         score_data=score_data,
         target_id=target_id,
         target_name=target_name,
@@ -500,7 +459,16 @@ async def score_command(client: Client, message: Message):
         time_key=t_key,
         word_length=w_len,
     )
-    await safe_tg_call(message.reply_text, text, reply_markup=markup, quote=True)
+
+    sent = await send_styled_message(
+        chat_id=message.chat.id,
+        text_html=text,
+        reply_markup=styled_kb_dict,
+        message_thread_id=getattr(message, "message_thread_id", None),
+        reply_to_message_id=message.id,
+    )
+    if not sent:
+        await safe_tg_call(message.reply_text, text, reply_markup=pyro_markup, quote=True)
 
 
 # ============================================================================
@@ -515,7 +483,7 @@ async def seekauth_command(client: Client, message: Message):
     if not await _is_chat_admin(client, message.chat.id, user.id):
         await safe_tg_call(
             message.reply_text,
-            "❌ <b>Only group administrators can manage authorized WordSeek users.</b>",
+            "❌ You don't have permission to use this command. Only administrators can manage authorized users.",
             quote=True,
         )
         return
@@ -526,22 +494,24 @@ async def seekauth_command(client: Client, message: Message):
     if action == "list":
         auth_list = await list_seek_users(message.chat.id)
         if not auth_list:
-            await safe_tg_call(message.reply_text, "📋 <b>No authorized users in this chat.</b>", quote=True)
+            await safe_tg_call(message.reply_text, "📋 No authorized users in this chat.", quote=True)
             return
         lines = []
         for u in auth_list:
             uid = u.get("user_id")
             nm = normalize_fancy_telegram_name(u.get("name", "User"))
-            lines.append(f"• <a href=\"tg://user?id={uid}\">{nm}</a> (<code>{uid}</code>)")
+            un = u.get("username")
+            lines.append(f'• <a href="tg://user?id={uid}">{nm}</a>{f" (@{un})" if un else ""}')
         await safe_tg_call(
             message.reply_text,
-            "🔐 <b>Authorized WordSeek Users:</b>\n<blockquote>" + "\n".join(lines) + "</blockquote>",
+            "<b>🔐 Authorized Users for Seek Game</b>\n\n" + "\n".join(lines),
             quote=True,
         )
         return
 
     if action == "remove":
-        target_user = None
+        t_id = None
+        t_name = "User"
         if message.reply_to_message and message.reply_to_message.from_user:
             target_user = message.reply_to_message.from_user
             t_id = target_user.id
@@ -552,12 +522,12 @@ async def seekauth_command(client: Client, message: Message):
                 t_id = int(doc["user_id"])
                 t_name = doc.get("first_name", "User")
             else:
-                await safe_tg_call(message.reply_text, "❌ <b>User not found.</b>", quote=True)
+                await safe_tg_call(message.reply_text, "❌ User not found.", quote=True)
                 return
         else:
             await safe_tg_call(
                 message.reply_text,
-                "ℹ️ <b>Usage:</b> Reply to a user or send <code>/seekauth remove @username</code>",
+                "Usage: /seekauth remove @username (or reply to a user)",
                 quote=True,
             )
             return
@@ -566,14 +536,13 @@ async def seekauth_command(client: Client, message: Message):
         if removed:
             await safe_tg_call(
                 message.reply_text,
-                f"✅ <b>Removed {normalize_fancy_telegram_name(t_name)} from authorized users.</b>",
+                f"✅ Removed {normalize_fancy_telegram_name(t_name)} from authorized users.",
                 quote=True,
             )
         else:
-            await safe_tg_call(message.reply_text, "ℹ️ <b>User was not in the authorized list.</b>", quote=True)
+            await safe_tg_call(message.reply_text, "❌ This user is not authorized.", quote=True)
         return
 
-    # Authorize a user (via reply or /seekauth @username)
     t_id = None
     t_name = "User"
     t_uname = None
@@ -591,7 +560,7 @@ async def seekauth_command(client: Client, message: Message):
     if not t_id:
         await safe_tg_call(
             message.reply_text,
-            "ℹ️ <b>Usage:</b>\n• Reply to a user with <code>/seekauth</code>\n• <code>/seekauth @username</code>\n• <code>/seekauth remove @username</code>\n• <code>/seekauth list</code>",
+            "Usage:\n• /seekauth @username\n• /seekauth remove @username\n• /seekauth list",
             quote=True,
         )
         return
@@ -599,7 +568,7 @@ async def seekauth_command(client: Client, message: Message):
     await authorize_seek_user(message.chat.id, t_id, t_name, t_uname, user.id)
     await safe_tg_call(
         message.reply_text,
-        f"✅ <b>Authorized <a href=\"tg://user?id={t_id}\">{normalize_fancy_telegram_name(t_name)}</a> to manage WordSeek games!</b>",
+        f'✅ Authorized <a href="tg://user?id={t_id}">{normalize_fancy_telegram_name(t_name)}</a> to end WordSeek games without voting.',
         quote=True,
     )
 
@@ -611,31 +580,32 @@ async def forum_topic_commands(client: Client, message: Message):
         return
 
     if not await _is_chat_admin(client, message.chat.id, user.id):
-        await safe_tg_call(message.reply_text, "❌ <b>Admin permission required.</b>", quote=True)
+        await safe_tg_call(message.reply_text, "Only administrators can use this command.", quote=True)
         return
 
     cmd = message.command[0].lower()
     topic_id = _get_topic_id(message)
+    uname = getattr(client.me, "username", None) or "Bot"
 
     if cmd == "setgametopic":
         created = await set_game_topic(message.chat.id, topic_id)
         if created:
             await safe_tg_call(
                 message.reply_text,
-                f"✅ <b>Topic <code>{topic_id}</code> is now set as an active game topic!</b>",
+                f"@{uname} will now use this topic for the game.",
                 quote=True,
             )
         else:
             await safe_tg_call(
                 message.reply_text,
-                "ℹ️ <b>This topic is already registered.</b> Use <code>/unsetgametopic</code> to remove it.",
+                "Game has already been set for this topic.\nUse /unsetgametopic to unset it first.",
                 quote=True,
             )
     elif cmd == "unsetgametopic":
         await unset_game_topic(message.chat.id, topic_id)
         await safe_tg_call(
             message.reply_text,
-            f"✅ <b>Removed game restriction for topic <code>{topic_id}</code>.</b>",
+            f"@{uname} won't use this topic for the game.",
             quote=True,
         )
     elif cmd == "allowonlylen":
@@ -647,7 +617,7 @@ async def forum_topic_commands(client: Client, message: Message):
         if not lengths:
             await safe_tg_call(
                 message.reply_text,
-                "ℹ️ <b>Usage:</b> <code>/allowonlylen 5 4 6</code> (Allowed values: 4, 5, 6)",
+                "Usage: /allowonlylen 5 4 6",
                 quote=True,
             )
             return
@@ -655,7 +625,7 @@ async def forum_topic_commands(client: Client, message: Message):
         await set_topic_allowed_lengths(message.chat.id, topic_id, lengths)
         await safe_tg_call(
             message.reply_text,
-            f"✅ <b>Allowed WordSeek lengths updated!</b>\n• Default: <code>{lengths[0]}L</code>\n• Allowed: <code>{', '.join(str(x) for x in lengths)}</code>",
+            f"Allowed word lengths updated.\nDefault length: {lengths[0]}\nAllowed: {', '.join(str(x) for x in lengths)}",
             quote=True,
         )
 
@@ -696,7 +666,7 @@ async def wordseek_callbacks(client: Client, query: CallbackQuery):
 
     data = query.data
 
-    # 1. Letter color hint toast (`wh:<state>:<letter>`)
+    # 1. Bot API 10.3 `<tg-button>` letter hint toast (`wh:<state>:<letter>`)
     if data.startswith("wh:"):
         parts = data.split(":")
         state = parts[1] if len(parts) > 1 else ""
@@ -704,9 +674,9 @@ async def wordseek_callbacks(client: Client, query: CallbackQuery):
         hints = {
             "correct": f'🟩 "{letter}" is in the word and in the right spot.',
             "present": f'🟨 "{letter}" is in the word, but in a different spot.',
-            "absent": f'🟥 "{letter}" is not in the word.',
+            "absent": f'🟥 "{letter}" isn\'t in the word.',
         }
-        await query.answer(hints.get(state, "Letter hint"), show_alert=False)
+        await query.answer(hints.get(state, "Unknown hint."), show_alert=False)
         return
 
     allowed_cb, wait_s = check_cooldown(f"cb:ws:{user.id}", CALLBACK_COOLDOWN)
@@ -740,100 +710,50 @@ async def wordseek_callbacks(client: Client, query: CallbackQuery):
         topic_id = parts[2] if len(parts) > 2 else _get_topic_id(query.message)
         session_key = (chat_id, topic_id)
 
-        if action == "hint":
+        if action == "vote_end":
             async with get_chat_lock(chat_id):
                 game = active_seek_games.get(session_key)
                 if not game:
-                    await query.answer("⚠️ No active WordSeek game!", show_alert=True)
-                    return
-                ok_h, h_wait = check_cooldown(f"wshint:{chat_id}:{topic_id}", HINT_COOLDOWN)
-                if not ok_h:
-                    await query.answer(f"⏳ Hint cooldown: wait {h_wait}s!", show_alert=True)
-                    return
-
-                sol = game["word"].upper()
-                rev: set[int] = game.setdefault("hint_revealed", set())
-                if len(rev) >= 2:
-                    await query.answer("⚠️ Max 2 letter hints per WordSeek game!", show_alert=True)
-                    return
-                avail_idx = [i for i in range(len(sol)) if i not in rev]
-                if avail_idx:
-                    import random as _rnd
-                    rev.add(_rnd.choice(avail_idx))
-                pattern = " ".join(sol[i] if i in rev else "_" for i in range(len(sol)))
-
-            await query.answer(f"💡 Pattern: {pattern}", show_alert=False)
-            await safe_tg_call(
-                query.message.reply_text,
-                f"💡 <b>WordSeek Hint:</b> <code>{pattern}</code> <b>({len(sol)}L)</b>",
-            )
-            return
-
-        if action in ("end", "vote_end"):
-            async with get_chat_lock(chat_id):
-                game = active_seek_games.get(session_key)
-                if not game:
-                    await query.answer("ℹ️ Game already ended.", show_alert=False)
-                    return
-
-                is_private = query.message.chat.type == ChatType.PRIVATE
-                is_starter = int(game.get("started_by", 0)) == user.id
-                is_sys_admin = user.id in SUDO_USERS
-                is_grp_admin = False if is_private else await _is_chat_admin(client, chat_id, user.id)
-                is_auth = False if is_private else await is_seek_authorized(chat_id, user.id)
-                user_link = f'<a href="tg://user?id={user.id}">{normalize_fancy_telegram_name(user.first_name)}</a>'
-
-                if action == "end" and (is_private or is_starter or is_sys_admin or is_grp_admin or is_auth):
-                    reason = f"<b>Ended by:</b> {user_link}" if not is_private else ""
-                    await _finish_and_reveal_seek(chat_id, client, game, reason)
-                    await query.answer("🛑 Game ended!")
+                    await query.answer("Game has already ended.", show_alert=True)
                     return
 
                 voters: set[int] = game.setdefault("voters", set())
                 if user.id in voters:
-                    await query.answer("⏳ You already voted to end!", show_alert=False)
+                    await query.answer("You have already voted to end the game.", show_alert=True)
                     return
+
                 voters.add(user.id)
                 count = len(voters)
 
                 if count >= 3:
-                    reason = f"<b>Ended by player vote ({count}/3)</b>"
+                    reason = "<b>Game ended by player vote (3/3)</b>"
+                    await safe_tg_call(query.message.delete)
                     await _finish_and_reveal_seek(chat_id, client, game, reason)
-                    await query.answer("✅ Vote passed! Game ended.")
+                    await query.answer("Vote passed! Game ended.")
                     return
 
+            votes_needed = 3 - count
             markup = InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
-                            f"✅ Vote ({count}/3)",
+                            f"✅ Vote to End ({count}/3)",
                             callback_data=f"ws:vote_end:{topic_id}",
                         )
                     ]
                 ]
             )
-            if action == "vote_end":
-                await safe_tg_call(
-                    query.message.edit_text,
-                    (
-                        f"🗳 <b>Vote to End WordSeek</b>\n\n"
-                        f"<blockquote>• <b>Votes Needed:</b> <code>3</code>\n"
-                        f"• <b>Current Votes:</b> <code>{count}/3</code></blockquote>\n"
-                        f"<i>Tap below to vote for ending the game.</i>"
-                    ),
-                    reply_markup=markup,
-                )
-            else:
-                await safe_tg_call(
-                    query.message.reply_text,
-                    (
-                        f"🗳 <b>Vote to End WordSeek</b>\n\n"
-                        f"<blockquote>{user_link} wants to end the game.\n"
-                        f"• <b>Current Votes:</b> <code>{count}/3</code></blockquote>"
-                    ),
-                    reply_markup=markup,
-                )
-            await query.answer(f"🗳 Vote recorded ({count}/3)!")
+            await safe_tg_call(
+                query.message.edit_text,
+                (
+                    f"<b>🗳️ Vote to End Game</b>\n\n"
+                    f"<b>Votes needed: 3 out of remaining players</b>\n"
+                    f"<b>Current votes: {count}/3</b>\n\n"
+                    f"React with the button below to vote for ending the game."
+                ),
+                reply_markup=markup,
+            )
+            await query.answer(f"Vote recorded! {votes_needed} more votes needed.")
             return
 
     # 3. WordSeek Leaderboard filter callbacks (`wslb:<search>:<time>:<len>[:r]`)
@@ -857,7 +777,7 @@ async def wordseek_callbacks(client: Client, query: CallbackQuery):
                 query.message
                 and (query.message.chat.type == ChatType.PRIVATE or query.message.photo)
             )
-            text, markup = build_seek_leaderboard_view(
+            text, pyro_markup, styled_kb_dict = build_seek_leaderboard_view(
                 entries=entries,
                 search_key=s_key,
                 time_key=t_key,
@@ -865,10 +785,17 @@ async def wordseek_callbacks(client: Client, query: CallbackQuery):
                 show_back=show_back,
             )
             if query.message and query.message.photo:
-                await safe_tg_call(query.message.edit_caption, caption=text, reply_markup=markup)
+                await safe_tg_call(query.message.edit_caption, caption=text, reply_markup=pyro_markup)
             elif query.message:
-                await safe_tg_call(query.message.edit_text, text=text, reply_markup=markup)
-            await query.answer("🔄 Refreshed!" if force_ref else "")
+                edited = await edit_styled_message(
+                    chat_id=chat_id,
+                    message_id=query.message.id,
+                    text_html=text,
+                    reply_markup=styled_kb_dict,
+                )
+                if not edited:
+                    await safe_tg_call(query.message.edit_text, text=text, reply_markup=pyro_markup)
+            await query.answer()
         return
 
     # 4. WordSeek User Score filter callbacks (`wsscore:<target_id>:<search>:<time>:<len>[:r]`)
@@ -888,7 +815,7 @@ async def wordseek_callbacks(client: Client, query: CallbackQuery):
                 time_key=t_key,
                 word_length=w_len,
             )
-            text, markup = build_seek_score_view(
+            text, pyro_markup, styled_kb_dict = build_seek_score_view(
                 score_data=score_data,
                 target_id=target_id,
                 target_name=user.first_name if target_id == user.id else "Player",
@@ -897,12 +824,19 @@ async def wordseek_callbacks(client: Client, query: CallbackQuery):
                 word_length=w_len,
             )
             if query.message:
-                await safe_tg_call(query.message.edit_text, text=text, reply_markup=markup)
+                edited = await edit_styled_message(
+                    chat_id=chat_id,
+                    message_id=query.message.id,
+                    text_html=text,
+                    reply_markup=styled_kb_dict,
+                )
+                if not edited:
+                    await safe_tg_call(query.message.edit_text, text=text, reply_markup=pyro_markup)
             await query.answer()
 
 
 # ============================================================================
-# WORDSEEK TEXT GUESS HANDLER (Group & Private / Daily)
+# WORDSEEK TEXT GUESS HANDLER — BOT API 10.3 RICH MESSAGE (<tg-button> ONLY!)
 # ============================================================================
 @Client.on_message(
     filters.text
@@ -934,14 +868,14 @@ async def handle_wordseek_guess(client: Client, message: Message):
             active_daily_sessions.pop(user.id, None)
             await safe_tg_call(
                 message.reply_text,
-                "⏰ <b>Your previous Daily session expired.</b> Send <code>/daily</code> to start today's challenge!",
+                "Your previous game has expired. Please start today's WordSeek with /daily",
             )
             return
 
         if not is_valid_seek_guess(raw_text, 5):
             await safe_tg_call(
                 message.reply_text,
-                f"❌ <code>{raw_text.upper()}</code> is not a valid 5-letter English word.",
+                f"{raw_text.upper()} is not a valid word.",
                 quote=True,
             )
             return
@@ -951,7 +885,7 @@ async def handle_wordseek_guess(client: Client, message: Message):
         if raw_text in guesses:
             await safe_tg_call(
                 message.reply_text,
-                "⚠️ <b>You already guessed that word!</b> Try a different 5-letter word.",
+                "You've already guessed this word. Try a different one!",
                 quote=True,
             )
             return
@@ -973,14 +907,15 @@ async def handle_wordseek_guess(client: Client, message: Message):
             await add_seek_score(user.id, user.first_name, user.username, chat_id, (7 - len(guesses)) * 5, 5)
 
             markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📤 Share Result", switch_inline_query=share_txt)]]
+                [[InlineKeyboardButton("📤 Share", switch_inline_query=share_txt)]]
             )
             await safe_tg_call(
                 message.reply_photo,
                 photo=img_io,
                 caption=(
-                    f"🎉 <b>Congratulations! You solved Daily WordSeek #{day_num} in {len(guesses)}/6!</b>\n\n"
-                    f"🔥 <b>Current Streak:</b> <code>{curr_s}</code>  •  ⭐ <b>Best Streak:</b> <code>{high_s}</code>\n\n"
+                    f"🎉 Congratulations! You guessed it in {len(guesses)} {'try' if len(guesses) == 1 else 'tries'}!\n\n"
+                    f"🔥 Current Streak: {curr_s}\n"
+                    f"⭐ Highest Streak: {high_s}\n\n"
                     f"{format_word_details(target_w, daily_doc)}"
                 ),
                 reply_markup=markup,
@@ -992,16 +927,16 @@ async def handle_wordseek_guess(client: Client, message: Message):
             await update_daily_streak(user.id, False, today_str)
             share_txt = generate_wordle_share_text(day_num, guesses, target_w)
             markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📤 Share Result", switch_inline_query=share_txt)]]
+                [[InlineKeyboardButton("📤 Share", switch_inline_query=share_txt)]]
             )
             await safe_tg_call(
                 message.reply_photo,
                 photo=img_io,
                 caption=(
-                    f"💔 <b>Game Over! Daily WordSeek #{day_num}</b>\n"
-                    f"Streak reset to <code>0</code>.\n\n"
+                    f"Game Over! The word was: {target_w.upper()}\n\n"
+                    f"💔 Streak reset to 0\n\n"
                     f"{format_word_details(target_w, daily_doc)}\n\n"
-                    f"<i>Come back tomorrow for a new challenge!</i>"
+                    f"Come back tomorrow for a new challenge!"
                 ),
                 reply_markup=markup,
             )
@@ -1011,7 +946,7 @@ async def handle_wordseek_guess(client: Client, message: Message):
         await safe_tg_call(
             message.reply_photo,
             photo=img_io,
-            caption=f"🎯 <b>{rem} {'attempt' if rem == 1 else 'attempts'} remaining!</b>",
+            caption=f"{rem} {'attempt' if rem == 1 else 'attempts'} remaining",
         )
         return
 
@@ -1033,7 +968,7 @@ async def handle_wordseek_guess(client: Client, message: Message):
     if not is_valid_seek_guess(raw_text, wlen):
         await safe_tg_call(
             message.reply_text,
-            f"❌ <code>{raw_text.upper()}</code> is not a valid {wlen}-letter word.",
+            f"{raw_text} is not a valid {wlen}-letter word.",
             quote=True,
         )
         return
@@ -1046,7 +981,7 @@ async def handle_wordseek_guess(client: Client, message: Message):
         if raw_text in game["guessed_set"]:
             await safe_tg_call(
                 message.reply_text,
-                "⚠️ <b>Someone already guessed that word!</b> Try another one.",
+                "Someone has already guessed your word. Please try another one!",
                 quote=True,
             )
             return
@@ -1056,8 +991,6 @@ async def handle_wordseek_guess(client: Client, message: Message):
         if raw_text == target_w:
             prev_guesses_count = len(game["guesses"])
             score = max(1, WORDSEEK_MAX_GUESSES - prev_guesses_count)
-            game["guesses"].append(raw_text)
-            all_guesses = list(game["guesses"])
             active_seek_games.pop(session_key, None)
 
             await add_seek_score(
@@ -1069,29 +1002,21 @@ async def handle_wordseek_guess(client: Client, message: Message):
                 word_length=wlen,
             )
 
-            winner_name = normalize_fancy_telegram_name(user.first_name)
-            board_rows = "\n".join(format_guess_emoji_row(g, target_w) for g in all_guesses[-8:])
-            details_block = format_word_details(target_w)
-            markup = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(f"▶️ New {wlen}L", callback_data=f"ws:new:{wlen}"),
-                        InlineKeyboardButton("🏆 Ranks", callback_data=f"wslb:group:all:{wlen}"),
-                    ]
-                ]
+            formatted_response = (
+                f"<blockquote>Congrats! You guessed it correctly.\n"
+                f"Correct Word: <b>{raw_text}</b>\n"
+                f"Added {score} to the leaderboard.</blockquote>\n"
+                f"Start with /new{wlen}"
             )
             await safe_tg_call(
                 message.reply_text,
-                (
-                    f"🎉 <b>Congrats {winner_name}! You guessed it!</b>\n"
-                    f"<blockquote>{board_rows}</blockquote>\n"
-                    f"{details_block}\n"
-                    f"<blockquote>🏆 Added <b>+{score} pts</b> to the {wlen}L leaderboard!\n"
-                    f"Start again with <code>/new{wlen}</code></blockquote>"
-                ),
-                reply_markup=markup,
+                formatted_response,
                 quote=True,
             )
+            try:
+                await message.react("🎉")
+            except Exception:
+                pass
             return
 
         game["guessed_set"].add(raw_text)
@@ -1100,26 +1025,23 @@ async def handle_wordseek_guess(client: Client, message: Message):
 
         if len(all_guesses) >= WORDSEEK_MAX_GUESSES:
             active_seek_games.pop(session_key, None)
-            details_block = format_word_details(target_w)
-            markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"▶️ New {wlen}L", callback_data=f"ws:new:{wlen}")]]
-            )
             await safe_tg_call(
                 message.reply_text,
-                (
-                    f"⏰ <b>Game Over! Maximum guesses ({WORDSEEK_MAX_GUESSES}) reached.</b>\n"
-                    f"{details_block}\n"
-                    f"Start a new game with <code>/new{wlen}</code>!"
-                ),
-                reply_markup=markup,
+                f"Game Over! The word was {target_w}\nYou can start a new game with /new{wlen}",
             )
             return
 
-    text, markup = build_wordseek_board_view(
-        guesses=all_guesses,
-        solution=target_w,
-        max_guesses=WORDSEEK_MAX_GUESSES,
-        evaluate_fn=evaluate_guess,
-        format_row_fn=format_guess_emoji_row,
+    # Send Bot API 10.3 RichMessage (`sendRichMessage`) where ONLY `<tg-button>` colored letter buttons appear!
+    rich_html = build_rich_feedback(all_guesses, target_w, WORDSEEK_MAX_GUESSES)
+    sent = await send_rich_message(
+        chat_id=chat_id,
+        html_content=rich_html,
+        message_thread_id=topic_id if topic_id != "general" else None,
     )
-    await safe_tg_call(message.reply_text, text, reply_markup=markup)
+    if not sent:
+        # Fallback if a custom Bot API root doesn't support sendRichMessage
+        fallback_rows = "\n".join(format_guess_emoji_row(g, target_w) for g in all_guesses)
+        await safe_tg_call(
+            message.reply_text,
+            f"<b>{wlen}-letter mode</b> (<i>{len(all_guesses)}/{WORDSEEK_MAX_GUESSES} guesses</i>)\n<blockquote>{fallback_rows}</blockquote>",
+        )

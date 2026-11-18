@@ -10,15 +10,23 @@ from bot.database.db import (
     get_user_rank,
     get_top_users,
     get_seek_user_score,
+    get_seek_leaderboard,
     is_user_banned,
 )
 from bot.config import CMD_COOLDOWN, CALLBACK_COOLDOWN, SUDO_USERS
 from bot.utils.cooldown import check_cooldown, get_user_lock, safe_tg_call
+from bot.utils.rich_api import (
+    send_rich_message,
+    edit_rich_message,
+    edit_styled_message,
+)
 from bot.utils.views import (
     build_start_view,
     build_help_view,
+    build_rich_help_html,
+    build_help_keyboard_dict,
     build_profile_view,
-    build_leaderboard_view,
+    build_seek_leaderboard_view,
 )
 
 logger = logging.getLogger("WordGridBot.Start")
@@ -112,16 +120,23 @@ async def help_command(client: Client, message: Message):
 
     uname = getattr(client.me, "username", None) or "WordGridGameBot"
     is_admin = bool(user and user.id in SUDO_USERS and message.chat.type == ChatType.PRIVATE)
-    text, markup = build_help_view(
-        bot_username=uname,
-        section="howto",
-        is_admin=is_admin,
-        show_back=True,
-    )
 
-    if message.chat.type == ChatType.PRIVATE:
-        await _send_start_media_or_text(client, message, text, markup)
-    else:
+    rich_html = build_rich_help_html("howto")
+    kb_dict = build_help_keyboard_dict(is_admin=is_admin, active="howto", show_back=False)
+
+    sent = await send_rich_message(
+        chat_id=message.chat.id,
+        html_content=rich_html,
+        reply_markup=kb_dict,
+        message_thread_id=getattr(message, "message_thread_id", None),
+    )
+    if not sent:
+        text, markup = build_help_view(
+            bot_username=uname,
+            section="howto",
+            is_admin=is_admin,
+            show_back=False,
+        )
         await safe_tg_call(message.reply_text, text, reply_markup=markup)
 
 
@@ -178,13 +193,37 @@ async def navigation_callbacks(client: Client, query: CallbackQuery):
 
         elif data == "nav:help" or data.startswith("help:"):
             sec = data.split(":", 1)[1] if ":" in data and data != "nav:help" else "howto"
-            text, markup = build_help_view(
-                bot_username=uname,
-                section=sec,
-                is_admin=is_admin,
-                show_back=True,
-            )
-            await edit_or_reply_view(query, text, markup)
+            if sec == "main":
+                sec = "howto"
+            if sec == "admin" and not is_admin:
+                await query.answer("You don't have permission to view this.", show_alert=True)
+                return
+
+            if query.message and query.message.photo:
+                text, markup = build_help_view(
+                    bot_username=uname,
+                    section=sec,
+                    is_admin=is_admin,
+                    show_back=True,
+                )
+                await edit_or_reply_view(query, text, markup)
+            elif query.message:
+                rich_html = build_rich_help_html(sec)
+                kb_dict = build_help_keyboard_dict(is_admin=is_admin, active=sec, show_back=False)
+                edited = await edit_rich_message(
+                    chat_id=query.message.chat.id,
+                    message_id=query.message.id,
+                    html_content=rich_html,
+                    reply_markup=kb_dict,
+                )
+                if not edited:
+                    text, markup = build_help_view(
+                        bot_username=uname,
+                        section=sec,
+                        is_admin=is_admin,
+                        show_back=False,
+                    )
+                    await edit_or_reply_view(query, text, markup)
             await query.answer()
 
         elif data in ("nav:profile", "profile:refresh"):
@@ -205,11 +244,24 @@ async def navigation_callbacks(client: Client, query: CallbackQuery):
             await query.answer("🔄 Updated!" if data == "profile:refresh" else "")
 
         elif data == "nav:lb":
-            top_users = await get_top_users(10)
-            text, markup = build_leaderboard_view(
-                mode="users",
-                entries=top_users,
+            chat_id = query.message.chat.id if query.message else user.id
+            entries = await get_seek_leaderboard(chat_id, "global", "all", 5)
+            text, pyro_markup, styled_kb_dict = build_seek_leaderboard_view(
+                entries=entries,
+                search_key="global",
+                time_key="all",
+                word_length=5,
                 show_back=True,
             )
-            await edit_or_reply_view(query, text, markup)
+            if query.message and not query.message.photo:
+                edited = await edit_styled_message(
+                    chat_id=chat_id,
+                    message_id=query.message.id,
+                    text_html=text,
+                    reply_markup=styled_kb_dict,
+                )
+                if not edited:
+                    await edit_or_reply_view(query, text, pyro_markup)
+            else:
+                await edit_or_reply_view(query, text, pyro_markup)
             await query.answer()

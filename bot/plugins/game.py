@@ -14,6 +14,7 @@ from bot.utils.views import (
     build_seek_leaderboard_view,
     normalize_fancy_telegram_name,
 )
+from bot.utils.rich_api import send_styled_message
 from bot.utils.cooldown import (
     check_cooldown,
     get_chat_lock,
@@ -717,33 +718,27 @@ async def check_answer(client: Client, message: Message):
 
 def _parse_leaderboard_args(args: list[str], is_private: bool) -> tuple[bool, str, str, int]:
     """
-    Checks if `/leaderboard` was called with WordSeek filter arguments like:
-    `/leaderboard global week 6` or `/leaderboard 4`.
-    Returns `(is_seek_filter, search_key, time_key, word_length)`.
+    Parses `/leaderboard [scope] [period] [length]` arguments.
+    By default, `/leaderboard` opens WordSeek's styled leaderboard (with a 1-tap toggle to Word Grid),
+    or Word Grid if `grid` is passed.
     """
-    if not args:
-        return False, ("global" if is_private else "group"), "all", 5
-
     search_key = "global" if is_private else "group"
-    time_key = "today"
+    time_key = "today" if not is_private else "all"
     word_length = 5
-    matched_any = False
+    is_grid = False
 
     for raw in args:
         tok = raw.strip().lower()
-        if tok in ("global", "group", "chat"):
+        if tok in ("grid", "wordgrid"):
+            is_grid = True
+        elif tok in ("global", "group", "chat"):
             search_key = "group" if tok in ("group", "chat") else "global"
-            matched_any = True
         elif tok in ("today", "week", "month", "year", "all"):
             time_key = tok
-            matched_any = True
         elif tok in ("4", "5", "6", "4l", "5l", "6l"):
             word_length = int(tok[0])
-            matched_any = True
-        elif tok in ("seek", "wordseek"):
-            matched_any = True
 
-    return matched_any, search_key, time_key, word_length
+    return not is_grid, search_key, time_key, word_length
 
 
 @Client.on_message(filters.command(["leaderboard", "top"]))
@@ -758,23 +753,30 @@ async def leaderboard_command(client: Client, message: Message):
 
     is_private = message.chat.type == ChatType.PRIVATE
     args = message.command[1:] if message.command and len(message.command) > 1 else []
-    is_seek, s_key, t_key, w_len = _parse_leaderboard_args(args, is_private)
+    use_seek, s_key, t_key, w_len = _parse_leaderboard_args(args, is_private)
 
-    if is_seek:
+    if use_seek:
         entries = await get_seek_leaderboard(
             chat_id=message.chat.id,
             search_key=s_key,
             time_key=t_key,
             word_length=w_len,
         )
-        text, markup = build_seek_leaderboard_view(
+        text, pyro_markup, styled_kb_dict = build_seek_leaderboard_view(
             entries=entries,
             search_key=s_key,
             time_key=t_key,
             word_length=w_len,
             show_back=is_private,
         )
-        await safe_tg_call(message.reply_text, text, reply_markup=markup)
+        sent = await send_styled_message(
+            chat_id=message.chat.id,
+            text_html=text,
+            reply_markup=styled_kb_dict,
+            message_thread_id=getattr(message, "message_thread_id", None),
+        )
+        if not sent:
+            await safe_tg_call(message.reply_text, text, reply_markup=pyro_markup)
         return
 
     top_users = await get_top_users(10)

@@ -4,8 +4,8 @@ from pyrogram import Client
 from pyrogram.enums import ParseMode
 from bot.config import API_ID, API_HASH, BOT_TOKEN, PORT
 from bot.database.db import init_db, close_db
+from bot.utils.rich_api import close_http_session
 
-# Ensure an active event loop exists before Client instantiation (Python 3.12+ compatibility)
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -36,7 +36,6 @@ class Bot(Client):
         self._health_server = None
 
     async def _start_health_server(self):
-        """Lightweight TCP/HTTP responder if Heroku runs the bot on a web dyno ($PORT)."""
         if not PORT:
             return
 
@@ -78,6 +77,7 @@ class Bot(Client):
         if self._health_server is not None:
             self._health_server.close()
             await self._health_server.wait_closed()
+        await close_http_session()
         await close_db()
         await super().stop()
         logger.info("Bot stopped cleanly.")
