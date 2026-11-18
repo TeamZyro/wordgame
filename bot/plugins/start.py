@@ -9,9 +9,10 @@ from bot.database.db import (
     get_user,
     get_user_rank,
     get_top_users,
-    get_top_groups,
+    get_seek_user_score,
+    is_user_banned,
 )
-from bot.config import CMD_COOLDOWN, CALLBACK_COOLDOWN
+from bot.config import CMD_COOLDOWN, CALLBACK_COOLDOWN, SUDO_USERS
 from bot.utils.cooldown import check_cooldown, get_user_lock, safe_tg_call
 from bot.utils.views import (
     build_start_view,
@@ -27,7 +28,6 @@ _CACHED_START_FILE_ID: str | None = None
 
 
 async def _send_start_media_or_text(client: Client, message: Message, text: str, markup):
-    """Sends bundled start_img.png with Telegram file_id caching so Heroku uses zero extra disk/bandwidth."""
     global _CACHED_START_FILE_ID
     if _CACHED_START_FILE_ID:
         sent = await safe_tg_call(
@@ -53,8 +53,7 @@ async def _send_start_media_or_text(client: Client, message: Message, text: str,
     return await safe_tg_call(message.reply_text, text, reply_markup=markup)
 
 
-async def _edit_or_reply(query: CallbackQuery, text: str, markup):
-    """Edits caption if message has photo, otherwise edits text — preserving 100% view consistency."""
+async def edit_or_reply_view(query: CallbackQuery, text: str, markup):
     if query.message and query.message.photo:
         return await safe_tg_call(
             query.message.edit_caption,
@@ -74,6 +73,8 @@ async def _edit_or_reply(query: CallbackQuery, text: str, markup):
 async def start_command(client: Client, message: Message):
     user = message.from_user
     if user:
+        if await is_user_banned(user.id):
+            return
         allowed, _ = check_cooldown(f"cmd:start:{user.id}", CMD_COOLDOWN)
         if not allowed:
             return
@@ -103,12 +104,20 @@ async def start_command(client: Client, message: Message):
 async def help_command(client: Client, message: Message):
     user = message.from_user
     if user:
+        if await is_user_banned(user.id):
+            return
         allowed, _ = check_cooldown(f"cmd:help:{user.id}", CMD_COOLDOWN)
         if not allowed:
             return
 
     uname = getattr(client.me, "username", None) or "WordGridGameBot"
-    text, markup = build_help_view(bot_username=uname, show_back=True)
+    is_admin = bool(user and user.id in SUDO_USERS and message.chat.type == ChatType.PRIVATE)
+    text, markup = build_help_view(
+        bot_username=uname,
+        section="howto",
+        is_admin=is_admin,
+        show_back=True,
+    )
 
     if message.chat.type == ChatType.PRIVATE:
         await _send_start_media_or_text(client, message, text, markup)
@@ -116,44 +125,47 @@ async def help_command(client: Client, message: Message):
         await safe_tg_call(message.reply_text, text, reply_markup=markup)
 
 
-@Client.on_message(filters.command(["profile", "rank", "stats", "me"]))
+@Client.on_message(filters.command(["profile", "rank", "me"]))
 async def profile_command(client: Client, message: Message):
     user = message.from_user
-    if not user:
+    if not user or await is_user_banned(user.id):
         return
-    allowed, wait_sec = check_cooldown(f"cmd:profile:{user.id}", CMD_COOLDOWN)
+    allowed, _ = check_cooldown(f"cmd:profile:{user.id}", CMD_COOLDOWN)
     if not allowed:
         return
 
     await add_user(user.id, user.username, user.first_name)
     user_doc = await get_user(user.id)
     rank = await get_user_rank(user.id)
+    seek_data = await get_seek_user_score(user.id, message.chat.id, "global", "all", 5)
     text, markup = build_profile_view(
         user_id=user.id,
         first_name=user.first_name,
         user_doc=user_doc,
         rank=rank,
+        seek_data=seek_data,
         show_back=(message.chat.type == ChatType.PRIVATE),
     )
     await safe_tg_call(message.reply_text, text, reply_markup=markup)
 
 
-@Client.on_callback_query(filters.regex(r"^(nav:|profile:)"))
+@Client.on_callback_query(filters.regex(r"^(nav:|profile:|help[:_])"))
 async def navigation_callbacks(client: Client, query: CallbackQuery):
     user = query.from_user
-    if not user:
+    if not user or await is_user_banned(user.id):
         await query.answer()
         return
 
     allowed, wait_sec = check_cooldown(f"cb:nav:{user.id}", CALLBACK_COOLDOWN)
     if not allowed:
-        await query.answer(f"⏳ Please wait {wait_sec}s!", show_alert=False)
+        await query.answer(f"⏳ Wait {wait_sec}s!", show_alert=False)
         return
 
     async with get_user_lock(user.id):
-        data = query.data
+        data = query.data.replace("help_", "help:")
         uname = getattr(client.me, "username", None) or "WordGridGameBot"
         is_private = bool(query.message and query.message.chat.type == ChatType.PRIVATE)
+        is_admin = bool(user.id in SUDO_USERS and is_private)
 
         if data == "nav:home":
             text, markup = build_start_view(
@@ -161,27 +173,36 @@ async def navigation_callbacks(client: Client, query: CallbackQuery):
                 bot_username=uname,
                 is_private=is_private,
             )
-            await _edit_or_reply(query, text, markup)
+            await edit_or_reply_view(query, text, markup)
             await query.answer()
 
-        elif data == "nav:help":
-            text, markup = build_help_view(bot_username=uname, show_back=True)
-            await _edit_or_reply(query, text, markup)
+        elif data == "nav:help" or data.startswith("help:"):
+            sec = data.split(":", 1)[1] if ":" in data and data != "nav:help" else "howto"
+            text, markup = build_help_view(
+                bot_username=uname,
+                section=sec,
+                is_admin=is_admin,
+                show_back=True,
+            )
+            await edit_or_reply_view(query, text, markup)
             await query.answer()
 
         elif data in ("nav:profile", "profile:refresh"):
             await add_user(user.id, user.username, user.first_name)
             user_doc = await get_user(user.id)
             rank = await get_user_rank(user.id)
+            chat_id = query.message.chat.id if query.message else user.id
+            seek_data = await get_seek_user_score(user.id, chat_id, "global", "all", 5)
             text, markup = build_profile_view(
                 user_id=user.id,
                 first_name=user.first_name,
                 user_doc=user_doc,
                 rank=rank,
+                seek_data=seek_data,
                 show_back=True,
             )
-            await _edit_or_reply(query, text, markup)
-            await query.answer("🔄 Profile updated!" if data == "profile:refresh" else "")
+            await edit_or_reply_view(query, text, markup)
+            await query.answer("🔄 Updated!" if data == "profile:refresh" else "")
 
         elif data == "nav:lb":
             top_users = await get_top_users(10)
@@ -190,5 +211,5 @@ async def navigation_callbacks(client: Client, query: CallbackQuery):
                 entries=top_users,
                 show_back=True,
             )
-            await _edit_or_reply(query, text, markup)
+            await edit_or_reply_view(query, text, markup)
             await query.answer()

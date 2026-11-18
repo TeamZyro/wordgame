@@ -11,6 +11,7 @@ from bot.utils.views import (
     build_game_caption,
     build_game_board_markup,
     build_leaderboard_view,
+    build_seek_leaderboard_view,
     normalize_fancy_telegram_name,
 )
 from bot.utils.cooldown import (
@@ -25,6 +26,8 @@ from bot.database.db import (
     add_group_score,
     get_top_groups,
     add_group,
+    get_seek_leaderboard,
+    is_user_banned,
 )
 from bot.config import (
     CMD_COOLDOWN,
@@ -41,9 +44,17 @@ logger = logging.getLogger("WordGridBot.Game")
 active_games: dict[int, dict] = {}
 group_rounds: dict[int, int] = {}
 
+ALL_KNOWN_COMMANDS = [
+    "game", "stopgame", "hint", "panel", "admin", "broadcast",
+    "leaderboard", "top", "start", "help", "profile", "rank",
+    "stats", "me", "wordseek", "new", "new4", "new5", "new6",
+    "end", "endseek", "daily", "pausedaily", "score", "myscore",
+    "seekauth", "setgametopic", "unsetgametopic", "allowonlylen",
+    "id", "ban", "unban", "transfer",
+]
+
 
 def get_round_difficulty(round_num: int) -> tuple[int, int]:
-    """Returns `(word_count, time_limit_seconds)` for the given round."""
     if round_num <= 2:
         return 3, 45
     if round_num <= 4:
@@ -68,7 +79,6 @@ def get_round_difficulty(round_num: int) -> tuple[int, int]:
 
 
 def cancel_game_tasks(chat_id: int) -> None:
-    """Safely cancels any running timeout or round-transition tasks for `chat_id`."""
     game = active_games.get(chat_id)
     if not game:
         return
@@ -79,7 +89,6 @@ def cancel_game_tasks(chat_id: int) -> None:
 
 
 async def _update_board_media(client: Client, chat_id: int, game: dict, status_banner: str | None = None):
-    """Renders the updated grid off-thread and updates the board message media/caption safely."""
     try:
         updated_img_io = await asyncio.to_thread(
             render_grid_image,
@@ -112,7 +121,6 @@ async def _update_board_media(client: Client, chat_id: int, game: dict, status_b
 
 
 async def _debounced_board_update(client: Client, chat_id: int, game_id: str, delay: float = 1.2):
-    """Coalesces rapid consecutive word finds so Telegram group media rate limits are respected."""
     try:
         await asyncio.sleep(delay)
         async with get_chat_lock(chat_id):
@@ -125,7 +133,6 @@ async def _debounced_board_update(client: Client, chat_id: int, game_id: str, de
 
 
 async def game_timeout_monitor(client: Client, chat_id: int, game_id: str, round_num: int, duration: float):
-    """Monitors round time limit using a unique `game_id` token so old timers never kill new rounds."""
     try:
         await asyncio.sleep(duration)
     except asyncio.CancelledError:
@@ -144,8 +151,8 @@ async def game_timeout_monitor(client: Client, chat_id: int, game_id: str, round
 
         timeout_banner = (
             f"⏰ <b>TIME UP! Round {round_num} Expired.</b>\n"
-            f"🔍 <b>Missed Words:</b> {missed_str}\n"
-            f"🔄 <i>Streak reset to Round 1. Tap <b>▶️ Next / New Game</b> or type <code>/game</code>!</i>"
+            f"🔍 <b>Missed:</b> {missed_str}\n"
+            f"🔄 <i>Streak reset to Round 1. Tap <b>▶️ Play Again</b> or send <code>/game</code>!</i>"
         )
 
     await safe_tg_call(
@@ -163,20 +170,18 @@ async def game_timeout_monitor(client: Client, chat_id: int, game_id: str, round
             f"⏰ <b>ROUND {round_num} — TIME UP!</b>\n\n"
             f"<blockquote>"
             f"🔍 <b>Unfound Words:</b> {missed_str}\n"
-            f"📉 <b>Streak Status:</b> Reset to <b>Round 1</b>"
+            f"📉 <b>Streak:</b> Reset to <b>Round 1</b>"
             f"</blockquote>\n"
-            f"🎮 Tap below or send <code>/game</code> to start a fresh run!"
+            f"🎮 Tap below or send <code>/game</code> to play again!"
         ),
         reply_markup=build_game_board_markup(solved=True),
     )
 
 
 async def execute_round(client: Client, chat_id: int, status_message: Message | None = None):
-    """Generates and dispatches a new Word Grid round for `chat_id`."""
     async with get_chat_lock(chat_id):
         cancel_game_tasks(chat_id)
 
-        # Bounded memory cleanup if many groups have inactive games
         if len(active_games) > 300:
             solved_chats = [cid for cid, g in active_games.items() if g.get("solved")]
             for cid in solved_chats[:150]:
@@ -286,24 +291,27 @@ async def _auto_advance_round(client: Client, chat_id: int, expected_game_id: st
 
 @Client.on_message(filters.command(["game", "stopgame", "hint"]))
 async def game_commands(client: Client, message: Message):
+    user = message.from_user
+    if user and await is_user_banned(user.id):
+        return
+
     if message.chat.type == ChatType.PRIVATE:
         await safe_tg_call(
             message.reply_text,
             (
-                "⛔️ <b>Group Arena Mode Only!</b>\n\n"
-                "<blockquote>Word Grid Arcade is designed for multiplayer group chats. "
-                "Add me to a group and send <code>/game</code> to play!</blockquote>"
+                "⛔️ <b>Word Grid is for Groups!</b>\n\n"
+                "<blockquote>Add me to a group for 3D Word Grid (<code>/game</code>), "
+                "or play <b>WordSeek</b> right here in DM using <code>/new</code> or <code>/daily</code>!</blockquote>"
             ),
             quote=True,
         )
         return
 
-    user = message.from_user
     chat_id = message.chat.id
     cmd = message.command[0].lower()
 
     if user:
-        allowed, wait_sec = check_cooldown(f"cmd:{cmd}:{user.id}", CMD_COOLDOWN)
+        allowed, _ = check_cooldown(f"cmd:{cmd}:{user.id}", CMD_COOLDOWN)
         if not allowed:
             return
 
@@ -321,19 +329,19 @@ async def game_commands(client: Client, message: Message):
                     message_id=game["message_id"],
                     caption=build_game_caption(
                         game,
-                        status_banner="🛑 <b>Game stopped by player. Progress reset to Round 1.</b>",
+                        status_banner="🛑 <b>Game stopped. Progress reset to Round 1.</b>",
                     ),
                     reply_markup=build_game_board_markup(solved=True),
                 )
                 await safe_tg_call(
                     message.reply_text,
-                    f"🛑 <b>Round {stopped_round} Stopped!</b>\n<i>Progress has been reset to Round 1. Send <code>/game</code> to start again.</i>",
+                    f"🛑 <b>Round {stopped_round} Stopped!</b>\n<i>Progress reset to Round 1. Send <code>/game</code> to play again.</i>",
                 )
             else:
                 cancel_game_tasks(chat_id)
                 await safe_tg_call(
                     message.reply_text,
-                    "ℹ️ <b>No active game is running in this chat.</b>\n<i>Send <code>/game</code> to start Round 1!</i>",
+                    "ℹ️ <b>No active Word Grid game running.</b>\n<i>Send <code>/game</code> to start Round 1!</i>",
                 )
         return
 
@@ -341,12 +349,11 @@ async def game_commands(client: Client, message: Message):
         await _handle_hint_request(client, chat_id, message=message)
         return
 
-    # /game command
     allowed_chat, chat_wait = check_cooldown(f"chat:gamestart:{chat_id}", GAME_START_COOLDOWN)
     if not allowed_chat:
         await safe_tg_call(
             message.reply_text,
-            f"⏳ <b>Please wait {chat_wait}s before starting a new round!</b>",
+            f"⏳ <b>Wait {chat_wait}s before starting a new round!</b>",
         )
         return
 
@@ -360,9 +367,8 @@ async def game_commands(client: Client, message: Message):
                     await safe_tg_call(
                         message.reply_text,
                         (
-                            f"⚠️ <b>Round {active['round']} is already in progress!</b>\n"
-                            f"⏱ <b>Time Remaining:</b> <code>{time_left}s</code>\n"
-                            f"💡 <i>Solve the words on the board or send <code>/stopgame</code> to end it.</i>"
+                            f"⚠️ <b>Round {active['round']} is already running!</b>\n"
+                            f"⏱ <b>Remaining:</b> <code>{time_left}s</code>  •  Use <code>/stopgame</code> to end."
                         ),
                     )
                     return
@@ -372,7 +378,7 @@ async def game_commands(client: Client, message: Message):
         await add_group(chat_id, message.chat.title)
         group_rounds[chat_id] = 1
 
-    m = await safe_tg_call(message.reply_text, "🎮 <b>Starting Word Grid Arcade — Round 1...</b>")
+    m = await safe_tg_call(message.reply_text, "🎮 <b>Starting Word Grid — Round 1...</b>")
     await execute_round(client, chat_id, m)
 
 
@@ -382,21 +388,20 @@ async def _handle_hint_request(
     message: Message | None = None,
     query: CallbackQuery | None = None,
 ):
-    """Unlocks an extra letter hint for one unfound word with per-chat cooldown protection."""
     async with get_chat_lock(chat_id):
         game = active_games.get(chat_id)
         if not game or game.get("solved", True):
             if query:
-                await query.answer("⚠️ No active game running!", show_alert=True)
+                await query.answer("⚠️ No active Word Grid running!", show_alert=True)
             elif message:
                 await safe_tg_call(
                     message.reply_text,
-                    "⚠️ <b>No active game running!</b> Send <code>/game</code> to start.",
+                    "⚠️ <b>No active Word Grid running!</b> Send <code>/game</code> to start.",
                 )
             return
 
         if game["hints_used"] >= game["max_hints"]:
-            msg_txt = f"⚠️ Maximum hints ({game['max_hints']}/{game['max_hints']}) already used for Round {game['round']}!"
+            msg_txt = f"⚠️ Max hints ({game['max_hints']}/{game['max_hints']}) used for Round {game['round']}!"
             if query:
                 await query.answer(msg_txt, show_alert=True)
             elif message:
@@ -405,7 +410,7 @@ async def _handle_hint_request(
 
         allowed, wait_sec = check_cooldown(f"chat:hint:{chat_id}", HINT_COOLDOWN)
         if not allowed:
-            msg_txt = f"⏳ Hint cooldown! Wait {wait_sec}s before requesting another hint."
+            msg_txt = f"⏳ Hint cooldown! Wait {wait_sec}s."
             if query:
                 await query.answer(msg_txt, show_alert=True)
             elif message:
@@ -415,14 +420,13 @@ async def _handle_hint_request(
         unfound = [w for w, info in game["words"].items() if not info.get("found_by")]
         if not unfound:
             if query:
-                await query.answer("✅ All words already found!", show_alert=False)
+                await query.answer("✅ All words found!", show_alert=False)
             return
 
         target_word = random.choice(unfound)
         info = game["words"][target_word]
         revealed: set[int] = info.setdefault("revealed", set())
 
-        # Determine which internal letter indices are still hidden
         wlen = len(target_word)
         default_shown = {0, wlen - 1}
         if wlen >= 6:
@@ -447,11 +451,11 @@ async def _handle_hint_request(
     )
 
     if query:
-        await query.answer(f"💡 Hint unlocked: {new_hint} ({hints_left} left)", show_alert=False)
+        await query.answer(f"💡 Hint: {new_hint} ({hints_left} left)", show_alert=False)
     elif message:
         await safe_tg_call(
             message.reply_text,
-            f"💡 <b>Hint Unlocked:</b> <code>{new_hint}</code> <b>({len(target_word)}L)</b>  •  <i>{hints_left} hints left</i>",
+            f"💡 <b>Hint:</b> <code>{new_hint}</code> <b>({len(target_word)}L)</b>  •  <i>{hints_left} left</i>",
         )
 
 
@@ -461,8 +465,12 @@ async def game_board_callbacks(client: Client, query: CallbackQuery):
         await query.answer()
         return
 
-    chat_id = query.message.chat.id
     user = query.from_user
+    if await is_user_banned(user.id):
+        await query.answer()
+        return
+
+    chat_id = query.message.chat.id
     action = query.data.split(":", 1)[1]
 
     allowed_cb, cb_wait = check_cooldown(f"cb:game:{user.id}", CALLBACK_COOLDOWN)
@@ -478,12 +486,12 @@ async def game_board_callbacks(client: Client, query: CallbackQuery):
         async with get_chat_lock(chat_id):
             game = active_games.get(chat_id)
             if not game or game.get("solved", True):
-                await query.answer("⚠️ Round is already finished!", show_alert=True)
+                await query.answer("⚠️ Round is finished!", show_alert=True)
                 return
 
             allowed_ref, ref_wait = check_cooldown(f"chat:refresh:{chat_id}", REFRESH_COOLDOWN)
             if not allowed_ref:
-                await query.answer(f"⏳ Board refresh cooldown: wait {ref_wait}s!", show_alert=True)
+                await query.answer(f"⏳ Wait {ref_wait}s to refresh board!", show_alert=True)
                 return
 
             img_io = await asyncio.to_thread(
@@ -506,19 +514,19 @@ async def game_board_callbacks(client: Client, query: CallbackQuery):
                 game["message_id"] = new_msg.id
                 if old_msg_id:
                     await safe_tg_call(client.delete_messages, chat_id, old_msg_id)
-        await query.answer("🔄 Board moved to bottom of chat!")
+        await query.answer("🔄 Board moved to bottom!")
         return
 
     if action == "stop":
         async with get_chat_lock(chat_id):
             game = active_games.get(chat_id)
             if not game or game.get("solved", True):
-                await query.answer("ℹ️ Game is already stopped.", show_alert=False)
+                await query.answer("ℹ️ Already stopped.", show_alert=False)
                 return
             game["solved"] = True
             cancel_game_tasks(chat_id)
             group_rounds[chat_id] = 1
-            stopped_by = normalize_fancy_telegram_name(user.first_name, max_len=20)
+            stopped_by = normalize_fancy_telegram_name(user.first_name, max_len=18)
             await safe_tg_call(
                 client.edit_message_caption,
                 chat_id=chat_id,
@@ -529,12 +537,12 @@ async def game_board_callbacks(client: Client, query: CallbackQuery):
                 ),
                 reply_markup=build_game_board_markup(solved=True),
             )
-        await query.answer("🛑 Game stopped!")
+        await query.answer("🛑 Stopped!")
         return
 
     if action == "new":
         if query.message.chat.type == ChatType.PRIVATE:
-            await query.answer("Add me to a group chat to start a game!", show_alert=True)
+            await query.answer("Add me to a group for Word Grid!", show_alert=True)
             return
         allowed_chat, chat_wait = check_cooldown(f"chat:gamestart:{chat_id}", GAME_START_COOLDOWN)
         if not allowed_chat:
@@ -558,9 +566,8 @@ async def game_board_callbacks(client: Client, query: CallbackQuery):
 @Client.on_message(
     filters.text
     & ~filters.bot
-    & ~filters.command(
-        ["game", "stopgame", "hint", "panel", "admin", "broadcast", "leaderboard", "top", "start", "help", "profile", "rank", "stats", "me"]
-    )
+    & ~filters.command(ALL_KNOWN_COMMANDS),
+    group=1,
 )
 async def check_answer(client: Client, message: Message):
     chat_id = message.chat.id
@@ -576,6 +583,9 @@ async def check_answer(client: Client, message: Message):
         return
 
     user = message.from_user
+    if await is_user_banned(user.id):
+        return
+
     allowed_guess, _ = check_cooldown(f"guess:{chat_id}:{user.id}", GUESS_COOLDOWN)
     if not allowed_guess:
         return
@@ -585,14 +595,13 @@ async def check_answer(client: Client, message: Message):
         if not game or game.get("solved", True):
             return
 
-        # Verify timer has not expired
         if (time.monotonic() - game["start_time"]) > game["time_limit"]:
             game["solved"] = True
             cancel_game_tasks(chat_id)
             group_rounds[chat_id] = 1
             await safe_tg_call(
                 message.reply_text,
-                f"⏰ <b>TIME UP!</b>\nRound {game['round']} just expired. Progress reset to Round 1.\nSend <code>/game</code> to play again!",
+                f"⏰ <b>TIME UP!</b>\nRound {game['round']} expired. Reset to Round 1.\nSend <code>/game</code> to play again!",
                 quote=True,
             )
             return
@@ -602,7 +611,7 @@ async def check_answer(client: Client, message: Message):
             return
 
         if word_info["found_by"] is not None:
-            finder_name = normalize_fancy_telegram_name(word_info["found_by"], max_len=20)
+            finder_name = normalize_fancy_telegram_name(word_info["found_by"], max_len=18)
             await safe_tg_call(
                 message.reply_text,
                 f"⚠️ <code>{user_word}</code> was already found by <b>{finder_name}</b>!",
@@ -610,7 +619,6 @@ async def check_answer(client: Client, message: Message):
             )
             return
 
-        # Calculate points based on word length + round streak bonus
         if len(user_word) <= 4:
             base_points = 1
         elif len(user_word) <= 6:
@@ -624,7 +632,6 @@ async def check_answer(client: Client, message: Message):
         word_info["points"] = points
         game["found_words"].append(user_word)
 
-        # Track round MVP stats
         r_scores = game["round_scores"]
         if user.id not in r_scores:
             r_scores[user.id] = {"name": user.first_name, "pts": 0, "words": 0}
@@ -641,7 +648,6 @@ async def check_answer(client: Client, message: Message):
             group_rounds[chat_id] = next_round
             game_id = game["game_id"]
 
-    # Record DB scores outside the chat lock for snappy concurrency
     await add_score(
         user_id=user.id,
         first_name=user.first_name,
@@ -656,20 +662,18 @@ async def check_answer(client: Client, message: Message):
         round_num=game["round"],
     )
 
-    safe_finder = normalize_fancy_telegram_name(user.first_name, max_len=22)
+    safe_finder = normalize_fancy_telegram_name(user.first_name, max_len=20)
 
     if all_found:
-        # 1. Update the completed board FIRST so all words show highlighted & checked
         cleared_banner = f"🎊 <b>ROUND {cleared_round} CLEARED in {time_taken}s!</b>"
         await _update_board_media(client, chat_id, game, status_banner=cleared_banner)
 
-        # 2. Build round MVP breakdown
         mvp_lines = []
         sorted_contributors = sorted(
             game["round_scores"].values(), key=lambda x: (x["pts"], x["words"]), reverse=True
         )
         for idx, c in enumerate(sorted_contributors[:5]):
-            c_name = normalize_fancy_telegram_name(c["name"], max_len=20)
+            c_name = normalize_fancy_telegram_name(c["name"], max_len=18)
             medal = "🏅" if idx == 0 else "•"
             mvp_lines.append(f"{medal} <b>{c_name}:</b> <code>+{c['pts']} pts</code> ({c['words']}w)")
         mvp_block = "\n".join(mvp_lines)
@@ -677,14 +681,13 @@ async def check_answer(client: Client, message: Message):
         await safe_tg_call(
             message.reply_text,
             (
-                f"🎯 <b>{safe_finder}</b> found the final word <code>{user_word}</code> (<b>+{points} pts</b>)!\n\n"
+                f"🎯 <b>{safe_finder}</b> found <code>{user_word}</code> (<b>+{points} pts</b>)!\n\n"
                 f"🎊 <b>ROUND {cleared_round} CLEARED IN {time_taken}s!</b> 🎊\n"
                 f"<blockquote>{mvp_block}</blockquote>\n"
-                f"🔥 <i>Advancing to <b>Round {next_round}</b> in 3 seconds...</i>"
+                f"🔥 <i>Next Round {next_round} in 3 seconds...</i>"
             ),
         )
 
-        # 3. Schedule cancellable auto-progression task
         async with get_chat_lock(chat_id):
             if chat_id in active_games and active_games[chat_id].get("game_id") == game_id:
                 active_games[chat_id]["next_round_task"] = asyncio.create_task(
@@ -694,11 +697,10 @@ async def check_answer(client: Client, message: Message):
         rem = sum(1 for info in game["words"].values() if info["found_by"] is None)
         await safe_tg_call(
             message.reply_text,
-            f"🎉 <b>Nice!</b> <b>{safe_finder}</b> found <code>{user_word}</code>! (<b>+{points} pts</b>)  •  <i>{rem} left</i>",
+            f"🎉 <b>{safe_finder}</b> found <code>{user_word}</code>! (<b>+{points} pts</b>)  •  <i>{rem} left</i>",
             quote=True,
         )
 
-        # Debounce board image edits if multiple words are found within 1.5s
         now = time.monotonic()
         async with get_chat_lock(chat_id):
             prev_task = game.get("media_update_task")
@@ -713,19 +715,73 @@ async def check_answer(client: Client, message: Message):
                 )
 
 
+def _parse_leaderboard_args(args: list[str], is_private: bool) -> tuple[bool, str, str, int]:
+    """
+    Checks if `/leaderboard` was called with WordSeek filter arguments like:
+    `/leaderboard global week 6` or `/leaderboard 4`.
+    Returns `(is_seek_filter, search_key, time_key, word_length)`.
+    """
+    if not args:
+        return False, ("global" if is_private else "group"), "all", 5
+
+    search_key = "global" if is_private else "group"
+    time_key = "today"
+    word_length = 5
+    matched_any = False
+
+    for raw in args:
+        tok = raw.strip().lower()
+        if tok in ("global", "group", "chat"):
+            search_key = "group" if tok in ("group", "chat") else "global"
+            matched_any = True
+        elif tok in ("today", "week", "month", "year", "all"):
+            time_key = tok
+            matched_any = True
+        elif tok in ("4", "5", "6", "4l", "5l", "6l"):
+            word_length = int(tok[0])
+            matched_any = True
+        elif tok in ("seek", "wordseek"):
+            matched_any = True
+
+    return matched_any, search_key, time_key, word_length
+
+
 @Client.on_message(filters.command(["leaderboard", "top"]))
 async def leaderboard_command(client: Client, message: Message):
     user = message.from_user
     if user:
+        if await is_user_banned(user.id):
+            return
         allowed, _ = check_cooldown(f"cmd:lb:{user.id}", CMD_COOLDOWN)
         if not allowed:
             return
+
+    is_private = message.chat.type == ChatType.PRIVATE
+    args = message.command[1:] if message.command and len(message.command) > 1 else []
+    is_seek, s_key, t_key, w_len = _parse_leaderboard_args(args, is_private)
+
+    if is_seek:
+        entries = await get_seek_leaderboard(
+            chat_id=message.chat.id,
+            search_key=s_key,
+            time_key=t_key,
+            word_length=w_len,
+        )
+        text, markup = build_seek_leaderboard_view(
+            entries=entries,
+            search_key=s_key,
+            time_key=t_key,
+            word_length=w_len,
+            show_back=is_private,
+        )
+        await safe_tg_call(message.reply_text, text, reply_markup=markup)
+        return
 
     top_users = await get_top_users(10)
     text, markup = build_leaderboard_view(
         mode="users",
         entries=top_users,
-        show_back=(message.chat.type == ChatType.PRIVATE),
+        show_back=is_private,
     )
     await safe_tg_call(message.reply_text, text, reply_markup=markup)
 
@@ -733,7 +789,7 @@ async def leaderboard_command(client: Client, message: Message):
 @Client.on_callback_query(filters.regex(r"^(leaderboard_|lb:)"))
 async def leaderboard_callback(client: Client, query: CallbackQuery):
     user = query.from_user
-    if not user:
+    if not user or await is_user_banned(user.id):
         await query.answer()
         return
 
@@ -764,13 +820,12 @@ async def leaderboard_callback(client: Client, query: CallbackQuery):
             show_back=show_back,
         )
 
-        if query.message and query.message.photo and not query.message.caption_entities and "WORD GRID ARCADE — ROUND" in (query.message.caption or ""):
-            # Clicked "🏆 Ranks" button from an active game board — send as a separate message so the board isn't overwritten!
-            await safe_tg_call(
-                query.message.reply_text,
-                text=text,
-                reply_markup=markup,
-            )
+        if (
+            query.message
+            and query.message.photo
+            and "WORD GRID — ROUND" in (query.message.caption or "")
+        ):
+            await safe_tg_call(query.message.reply_text, text=text, reply_markup=markup)
             await query.answer()
             return
 
@@ -779,4 +834,4 @@ async def leaderboard_callback(client: Client, query: CallbackQuery):
         elif query.message:
             await safe_tg_call(query.message.edit_text, text=text, reply_markup=markup)
 
-        await query.answer("🔄 Leaderboard refreshed!" if force_refresh else "")
+        await query.answer("🔄 Updated!" if force_refresh else "")

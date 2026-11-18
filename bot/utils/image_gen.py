@@ -13,7 +13,6 @@ logger = logging.getLogger("WordGridBot.ImageGen")
 WORDS_JSON_PATH = os.path.join(os.path.dirname(__file__), "words.json")
 FONT_PATH = os.path.join(os.path.dirname(__file__), "GameFont.ttf")
 
-# Built-in fallback words if words.json is ever missing
 DEFAULT_WORDS = [
     "CAT", "DOG", "SUN", "SKY", "SEA", "ICE", "GEM", "KEY", "MAP", "OWL", "FOX",
     "BEAR", "LION", "WOLF", "HAWK", "STAR", "MOON", "FIRE", "WIND", "RAIN", "SNOW",
@@ -31,7 +30,6 @@ DEFAULT_WORDS = [
     "LANTERN", "HARVEST", "JOURNEY", "VICTORY", "CHAMPION", "TREASURE", "SAPPHIRE",
 ]
 
-# Strictly exclude obscure web-log acronyms/tokens even if an old words.json is loaded
 BLOCKED_TOKENS = {
     "JAN", "FEB", "MAR", "APR", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
     "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN", "DVD", "USA", "NON", "SAN",
@@ -71,7 +69,6 @@ def load_word_list() -> list[str]:
 
 WORD_LIST = load_word_list()
 
-# Pre-index words by length for O(1) round filtering
 WORDS_BY_LEN: dict[int, list[str]] = {}
 for _w in WORD_LIST:
     WORDS_BY_LEN.setdefault(len(_w), []).append(_w)
@@ -152,20 +149,20 @@ THEMES = {
 }
 
 FOUND_PALETTE = [
-    ((239, 68, 68), (145, 28, 28)),     # Vibrant Red
-    ((34, 197, 94), (18, 115, 52)),     # Emerald Green
-    ((59, 130, 246), (26, 72, 155)),    # Royal Blue
-    ((217, 70, 239), (126, 28, 145)),   # Neon Magenta
-    ((234, 179, 8), (140, 102, 4)),     # Golden Amber
-    ((6, 182, 212), (8, 105, 126)),     # Cyan Glow
-    ((249, 115, 22), (154, 58, 10)),    # Tangerine Orange
-    ((139, 92, 246), (78, 42, 158)),    # Electric Violet
-    ((236, 72, 153), (142, 30, 88)),    # Hot Pink
-    ((20, 184, 166), (12, 108, 96)),    # Teal Mint
-    ((132, 204, 22), (74, 120, 10)),    # Lime Zest
-    ((99, 102, 241), (48, 50, 150)),    # Indigo Pulse
-    ((244, 63, 94), (148, 24, 48)),     # Rose Crimson
-    ((14, 165, 233), (8, 95, 140)),     # Sky Azure
+    ((239, 68, 68), (145, 28, 28)),
+    ((34, 197, 94), (18, 115, 52)),
+    ((59, 130, 246), (26, 72, 155)),
+    ((217, 70, 239), (126, 28, 145)),
+    ((234, 179, 8), (140, 102, 4)),
+    ((6, 182, 212), (8, 105, 126)),
+    ((249, 115, 22), (154, 58, 10)),
+    ((139, 92, 246), (78, 42, 158)),
+    ((236, 72, 153), (142, 30, 88)),
+    ((20, 184, 166), (12, 108, 96)),
+    ((132, 204, 22), (74, 120, 10)),
+    ((99, 102, 241), (48, 50, 150)),
+    ((244, 63, 94), (148, 24, 48)),
+    ((14, 165, 233), (8, 95, 140)),
 ]
 
 
@@ -192,10 +189,6 @@ def create_single_hint(word: str, revealed_indices: set[int] | None = None) -> s
 
 
 def place_word(word_to_place: str, grid: list[list[str]], size: int, force_type: str = "any"):
-    """
-    Places `word_to_place` in `grid`, preferring valid character intersections
-    to build tight, engaging crossword-style overlaps.
-    """
     all_directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
     if force_type == "cross":
         directions = [(1, 1), (1, -1)]
@@ -234,7 +227,6 @@ def place_word(word_to_place: str, grid: list[list[str]], size: int, force_type:
                 if existing == letter:
                     overlap += 1
 
-            # Avoid completely overlapping an identical segment
             if can_place and overlap < wlen:
                 if overlap > best_overlap:
                     best_overlap = overlap
@@ -258,7 +250,6 @@ def place_word(word_to_place: str, grid: list[list[str]], size: int, force_type:
 
 
 def _select_non_substring_words(pool: list[str], count: int) -> list[str]:
-    """Selects `count` unique words ensuring no chosen word is a substring of another."""
     candidates = random.sample(pool, min(len(pool), count * 4))
     selected: list[str] = []
     for w in candidates:
@@ -277,7 +268,6 @@ def _select_non_substring_words(pool: list[str], count: int) -> list[str]:
 
 
 def create_new_game_state(word_count: int = 3, round_num: int = 1):
-    # Properly proportioned grid sizes so words always fit cleanly
     if word_count <= 2:
         size = 5
     elif word_count <= 4:
@@ -291,7 +281,6 @@ def create_new_game_state(word_count: int = 3, round_num: int = 1):
     else:
         size = 10
 
-    # Progressive word length curve based on round
     if round_num <= 2:
         min_len, max_len = 3, 4
     elif round_num <= 5:
@@ -325,7 +314,6 @@ def create_new_game_state(word_count: int = 3, round_num: int = 1):
         words_info = {}
         actual_count = min(word_count, len(valid_words))
         target_words = _select_non_substring_words(valid_words, actual_count)
-        # Place longest words first for near-100% placement reliability
         target_words.sort(key=len, reverse=True)
 
         palette = FOUND_PALETTE[:]
@@ -357,7 +345,6 @@ def create_new_game_state(word_count: int = 3, round_num: int = 1):
     grid = best_grid if best_grid is not None else [["" for _ in range(size)] for _ in range(size)]
     words_info = best_words_info
 
-    # Fill remaining empty cells with weighted common letters so decoys look natural
     filler_pool = "AAEEIIOOUURRSSRTTLNNLLCCDDMMPBGHHFFYYWKV"
     for r in range(size):
         for c in range(size):
@@ -382,8 +369,8 @@ def render_grid_image(
     cell_size = 104 if size <= 7 else (94 if size <= 9 else 86)
 
     margin_side = 46
-    margin_top = 156
-    margin_bottom = 48
+    margin_top = 148
+    margin_bottom = 46
 
     grid_width = size * cell_size + margin_side * 2
     grid_height = size * cell_size + margin_top + margin_bottom
@@ -391,13 +378,13 @@ def render_grid_image(
     img = Image.new("RGB", (grid_width, grid_height), color=theme["bg"])
     draw = ImageDraw.Draw(img)
 
-    font_title = get_cached_font(40)
-    font_sub = get_cached_font(23)
-    font_letter = get_cached_font(int(cell_size * 0.58))
+    # Balanced, non-oversized typography for header and 3D tile buttons
+    font_title = get_cached_font(34)
+    font_sub = get_cached_font(20)
+    font_letter = get_cached_font(int(cell_size * 0.44))
 
-    # Top header banner card
     draw.rounded_rectangle(
-        [20, 18, grid_width - 20, 128],
+        [20, 16, grid_width - 20, 122],
         radius=16,
         fill=theme["header_bg"],
         outline=theme["board_glow"],
@@ -413,16 +400,15 @@ def render_grid_image(
         font=font_title,
     )
 
-    sub_text = f"ROUND {round_num}   •   THEME: {theme_name.upper()}   •   FOUND: {len(found_words)}/{len(words_info)}"
+    sub_text = f"Round {round_num}   •   Theme: {theme_name.title()}   •   Found: {len(found_words)}/{len(words_info)}"
     sub_w, _, _ = _text_metrics(draw, sub_text, font_sub)
     draw.text(
-        ((grid_width - sub_w) / 2, 84),
+        ((grid_width - sub_w) / 2, 80),
         sub_text,
         fill=theme["text_col"],
         font=font_sub,
     )
 
-    # Outer glowing board frame
     rect_pad = 12
     draw.rounded_rectangle(
         [
@@ -437,7 +423,6 @@ def render_grid_image(
         width=4,
     )
 
-    # Pre-map cell colors for found words
     cell_highlight: dict[tuple[int, int], tuple[tuple[int, int, int], tuple[int, int, int]]] = {}
     for fw in found_words:
         if fw in words_info:
@@ -446,15 +431,14 @@ def render_grid_image(
             for pos in words_info[fw]["positions"]:
                 cell_highlight[tuple(pos)] = (f_col, s_col)
 
-    # Draw 3D beveled cells
     for row in range(size):
         for col in range(size):
             letter = grid[row][col]
             x0 = margin_side + col * cell_size
             y0 = margin_top + row * cell_size
 
-            cx0, cy0 = x0 + 5, y0 + 5
-            cx1, cy1 = x0 + cell_size - 5, y0 + cell_size - 5
+            cx0, cy0 = x0 + 6, y0 + 6
+            cx1, cy1 = x0 + cell_size - 6, y0 + cell_size - 6
 
             if (row, col) in cell_highlight:
                 fill_col, shadow_col = cell_highlight[(row, col)]
@@ -464,11 +448,10 @@ def render_grid_image(
                 shadow_col = theme["cell_shadow"]
                 txt_col = theme["text_col"]
 
-            # 3D shadow + main tile + top bevel highlight
             draw.rounded_rectangle([cx0 + 2, cy0 + 6, cx1 + 2, cy1 + 6], radius=14, fill=shadow_col)
             draw.rounded_rectangle([cx0, cy0, cx1, cy1], radius=14, fill=fill_col)
 
-            lighter_shade = tuple(min(255, c + 42) for c in fill_col)
+            lighter_shade = tuple(min(255, c + 38) for c in fill_col)
             draw.rounded_rectangle(
                 [cx0 + 2, cy0 + 2, cx1 - 2, cy1 - 2],
                 radius=12,
@@ -480,8 +463,6 @@ def render_grid_image(
             tx = cx0 + ((cx1 - cx0) - text_w) / 2
             ty = cy0 + ((cy1 - cy0) - text_h) / 2 - y_offset
 
-            # Subtle letter drop-shadow for crisp contrast
-            draw.text((tx + 2, ty + 2), letter, fill=shadow_col, font=font_letter)
             draw.text((tx, ty), letter, fill=txt_col, font=font_letter)
 
     img_io = BytesIO()
