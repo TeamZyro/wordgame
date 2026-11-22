@@ -67,10 +67,10 @@ class Bot(Client):
         except Exception as e:
             logger.warning("Could not bind health-check port %s: %s", PORT, e)
 
-    async def start(self):
+    async def start(self, *args, **kwargs):
         await init_db()
         await self._start_health_server()
-        await super().start()
+        await super().start(*args, **kwargs)
         me = await self.get_me()
         self.me = me
         usernames = await refresh_bot_usernames(self, me=me)
@@ -83,13 +83,13 @@ class Bot(Client):
             ", ".join(f"@{u}" for u in sorted(usernames)) or "none",
         )
 
-    async def stop(self, *args):
+    async def stop(self, *args, **kwargs):
         if self._health_server is not None:
             self._health_server.close()
             await self._health_server.wait_closed()
         await close_http_session()
         await close_db()
-        await super().stop()
+        await super().stop(*args, **kwargs)
         logger.info("Bot stopped cleanly.")
 
 
