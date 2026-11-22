@@ -16,6 +16,11 @@ SUDO_USERS = [
     for x in os.getenv("SUDO_USERS", "9267131580, 9267131580").split(",")
     if x.strip().isdigit()
 ]
+BOT_USERNAMES = [
+    x.strip().lstrip("@")
+    for x in os.getenv("BOT_USERNAMES", os.getenv("BOT_USERNAME", "")).split(",")
+    if x.strip().lstrip("@")
+]
 SUPPORT_GROUP = os.getenv("SUPPORT_GROUP", "https://t.me/cheatbotbase")
 UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/aoinetwork")
 TIME_ZONE = os.getenv("TIME_ZONE", "Asia/Kolkata")

@@ -1,7 +1,59 @@
 import html
 import unicodedata
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import InlineKeyboardMarkup
 from bot.config import SUPPORT_GROUP, UPDATE_CHANNEL, TIME_ZONE
+from bot.utils.emojis import (
+    E_GAME,
+    E_GRID,
+    E_TOP,
+    E_CROWN,
+    E_BEST,
+    E_LEVELUP,
+    E_NEW,
+    E_BOLT,
+    E_CLOVER,
+    E_VERIFIED,
+    E_CHECK,
+    E_CROSS,
+    E_WARN,
+    E_TIMER,
+    E_CLOCK24,
+    E_REFRESH,
+    E_SEARCH,
+    E_USER,
+    E_ROBOT,
+    E_SETTINGS,
+    E_MEGAPHONE,
+    E_CHAT,
+    E_GIFT,
+    E_WAVE,
+    E_ANIME_CUTE,
+    E_FILE,
+    E_COMPOSE,
+    E_PENCIL,
+    E_STATS,
+    ID_GAME,
+    ID_GRID,
+    ID_TOP,
+    ID_CROWN,
+    ID_CLOVER,
+    ID_REFRESH,
+    ID_STOP,
+    ID_PLAY,
+    ID_USER,
+    ID_COMPOSE,
+    ID_MEGAPHONE,
+    ID_CHAT,
+    ID_ADD,
+    ID_STATS,
+    ID_SETTINGS,
+    ID_SHARE,
+    ID_GIFT,
+    ID_CLOCK24,
+    ID_SKIP,
+    make_button,
+    make_api_button,
+)
 
 
 def normalize_fancy_telegram_name(name: str | None, max_len: int = 26) -> str:
@@ -39,25 +91,33 @@ def _fmt_tab(label: str, active: bool) -> str:
 
 
 def markup_dict_to_pyrogram(markup_dict: dict | None) -> InlineKeyboardMarkup | None:
-    """Converts a Bot API reply_markup dict into a Pyrogram InlineKeyboardMarkup for fallback."""
+    """Converts a Bot API reply_markup dict into a Kurigram InlineKeyboardMarkup (preserving custom icons)."""
     if not markup_dict or "inline_keyboard" not in markup_dict:
         return None
     pyro_rows = []
     for row in markup_dict["inline_keyboard"]:
         p_row = []
         for btn in row:
+            raw_text = btn.get("text", "")
+            text = "" if raw_text == "\u2060" else raw_text
+            icon_id = btn.get("icon_custom_emoji_id")
             if "url" in btn:
-                p_row.append(InlineKeyboardButton(btn["text"], url=btn["url"]))
+                p_row.append(make_button(text, url=btn["url"], icon_id=icon_id))
             elif "switch_inline_query" in btn:
                 p_row.append(
-                    InlineKeyboardButton(
-                        btn["text"], switch_inline_query=btn["switch_inline_query"]
+                    make_button(
+                        text,
+                        switch_inline_query=btn["switch_inline_query"],
+                        icon_id=icon_id,
                     )
                 )
             else:
                 p_row.append(
-                    InlineKeyboardButton(
-                        btn["text"], callback_data=btn.get("callback_data", "noop")
+                    make_button(
+                        text,
+                        callback_data=btn.get("callback_data", "noop"),
+                        icon_id=icon_id,
+                        fallback_prefix="🔄" if not text else "",
                     )
                 )
         if p_row:
@@ -66,7 +126,7 @@ def markup_dict_to_pyrogram(markup_dict: dict | None) -> InlineKeyboardMarkup | 
 
 
 # ============================================================================
-# WORD GRID ARCADE BOARD CAPTION & COMPACT BUTTONS
+# WORD GRID ARCADE BOARD CAPTION & COMPACT KURIGRAM BUTTONS
 # ============================================================================
 def build_game_caption(game_data: dict, status_banner: str | None = None) -> str:
     round_num = game_data.get("round", 1)
@@ -79,8 +139,8 @@ def build_game_caption(game_data: dict, status_banner: str | None = None) -> str
     max_hints = game_data.get("max_hints", 3)
 
     lines = [
-        f"🧩 <b>WORD GRID — ROUND {round_num}</b>",
-        f"🎨 <code>{theme_name}</code>  •  ⏱ <code>{time_limit}s</code>  •  🎯 <code>{found_count}/{total_words}</code>",
+        f"{E_GRID} <b>WORD GRID — ROUND {round_num}</b>",
+        f"{E_CLOVER} <code>{theme_name}</code>  •  {E_TIMER} <code>{time_limit}s</code>  •  {E_CHECK} <code>{found_count}/{total_words}</code>",
         "",
     ]
 
@@ -90,10 +150,12 @@ def build_game_caption(game_data: dict, status_banner: str | None = None) -> str
         if finder:
             safe_finder = normalize_fancy_telegram_name(finder, max_len=18)
             pts = info.get("points", 1)
-            word_lines.append(f"✅ <b>{html.escape(actual_word)}</b> — <i>{safe_finder} (+{pts})</i>")
+            word_lines.append(
+                f"{E_VERIFIED} <b>{html.escape(actual_word)}</b> — <i>{safe_finder} (+{pts})</i>"
+            )
         else:
             hint_str = info.get("hint") or format_hint_pattern(actual_word, info.get("revealed"))
-            word_lines.append(f"💡 <code>{hint_str}</code> <b>({len(actual_word)}L)</b>")
+            word_lines.append(f"{E_SEARCH} <code>{hint_str}</code> <b>({len(actual_word)}L)</b>")
 
     lines.append("<blockquote>" + "\n".join(word_lines) + "</blockquote>")
 
@@ -101,7 +163,7 @@ def build_game_caption(game_data: dict, status_banner: str | None = None) -> str
         lines.append(f"\n{status_banner}")
     else:
         lines.append(
-            f"\n💬 <i>Type a word in chat!</i>  •  💡 <b>Hints:</b> <code>{max_hints - hints_used}/{max_hints}</code>"
+            f"\n{E_PENCIL} <i>Type a word in chat!</i>  •  {E_CLOVER} <b>Hints:</b> <code>{max_hints - hints_used}/{max_hints}</code>"
         )
 
     return "\n".join(lines)
@@ -112,27 +174,27 @@ def build_game_board_markup(solved: bool = False) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("▶️ Play Again", callback_data="game:new"),
-                    InlineKeyboardButton("🏆 Ranks", callback_data="lb:users"),
+                    make_button("Play Again", callback_data="game:new", icon_id=ID_PLAY, fallback_prefix="▶️"),
+                    make_button("Ranks", callback_data="lb:users", icon_id=ID_TOP, fallback_prefix="🏆"),
                 ]
             ]
         )
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("💡 Hint", callback_data="game:hint"),
-                InlineKeyboardButton("🔄 Board", callback_data="game:refresh"),
-                InlineKeyboardButton("🛑 Stop", callback_data="game:stop"),
+                make_button("Hint", callback_data="game:hint", icon_id=ID_CLOVER, fallback_prefix="💡"),
+                make_button("Board", callback_data="game:refresh", icon_id=ID_REFRESH, fallback_prefix="🔄"),
+                make_button("Stop", callback_data="game:stop", icon_id=ID_STOP, fallback_prefix="🛑"),
             ],
             [
-                InlineKeyboardButton("🏆 Ranks", callback_data="lb:users"),
+                make_button("Leaderboard", callback_data="lb:users", icon_id=ID_TOP, fallback_prefix="🏆"),
             ],
         ]
     )
 
 
 # ============================================================================
-# BOT API 10.3 RICH MESSAGE HELP VIEW (Ported 1:1 from WordSeek-master/src/commands/help.ts)
+# BOT API 10.3 RICH MESSAGE HELP VIEW (Clean Mobile UI + <tg-button> Examples)
 # ============================================================================
 EXAMPLE_STYLE = {
     "correct": ' style="success"',
@@ -148,7 +210,7 @@ def _example_button(state: str, letter: str) -> str:
 
 def build_rich_help_html(section: str = "howto") -> str:
     """
-    Returns Bot API 10.3 RichMessage HTML for `/help` and `help_*` callbacks,
+    Returns Bot API 10.3 RichMessage HTML for `/help` and `help:*` callbacks,
     using `<tg-button>`, `<h3>`, `<h4>`, `<table bordered compact>`, and `<details>`.
     """
     if section == "grid":
@@ -253,7 +315,7 @@ def build_rich_help_html(section: str = "howto") -> str:
             "</blockquote>"
         )
 
-    # Default: "howto" — exact port of getHowToPlayMessage() from WordSeek-master/src/commands/help.ts
+    # Default: "howto"
     ex_s = _example_button("correct", "S")
     ex_t = _example_button("present", "T")
     ex_x = _example_button("absent", "X")
@@ -321,35 +383,34 @@ def build_help_keyboard_dict(
     show_back: bool = False,
 ) -> dict:
     """
-    Builds Bot API 10.3 `reply_markup` dict with `"style": "primary"` on active tabs
-    and `"style": "success"` on action buttons, matching WordSeek-master's `getMainHelpKeyboard`.
+    Builds Bot API 10.3 `reply_markup` dict with custom emoji icons,
+    `"style": "primary"` on active tabs, and `"style": "success"` on support.
     """
-    def _tab_btn(label: str, sec_key: str) -> dict:
+    def _tab_btn(label: str, sec_key: str, icon_id: str | None = None) -> dict:
         is_act = active == sec_key
-        btn = {
-            "text": _fmt_tab(label, is_act),
-            "callback_data": f"help:{sec_key}",
-        }
-        if is_act:
-            btn["style"] = "primary"
-        return btn
+        return make_api_button(
+            _fmt_tab(label, is_act),
+            callback_data=f"help:{sec_key}",
+            icon_id=icon_id,
+            style="primary" if is_act else None,
+        )
 
     rows = [
-        [_tab_btn("How to Play", "howto"), _tab_btn("Word Grid", "grid")],
-        [_tab_btn("Scores", "scores"), _tab_btn("Group Settings", "group")],
-        [_tab_btn("Other Commands", "other")],
+        [_tab_btn("How to Play", "howto", ID_GAME), _tab_btn("Word Grid", "grid", ID_GRID)],
+        [_tab_btn("Scores", "scores", ID_TOP), _tab_btn("Group Setup", "group", ID_SETTINGS)],
+        [_tab_btn("Other", "other", ID_COMPOSE)],
     ]
     if is_admin:
-        rows[-1].append(_tab_btn("👑 Admin", "admin"))
+        rows[-1].append(_tab_btn("Admin", "admin", ID_CROWN))
 
     rows.append(
         [
-            {"text": "📢 Updates", "url": UPDATE_CHANNEL},
-            {"text": "💬 Support", "url": SUPPORT_GROUP, "style": "success"},
+            make_api_button("Updates", url=UPDATE_CHANNEL, icon_id=ID_MEGAPHONE),
+            make_api_button("Support", url=SUPPORT_GROUP, icon_id=ID_CHAT, style="success"),
         ]
     )
     if show_back:
-        rows.append([{"text": "⬅️ Back", "callback_data": "nav:home"}])
+        rows.append([make_api_button("Back", callback_data="nav:home", icon_id=ID_SKIP)])
 
     return {"inline_keyboard": rows}
 
@@ -360,73 +421,72 @@ def build_help_view(
     is_admin: bool = False,
     show_back: bool = True,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Fallback Pyrogram HTML help view when editing a photo caption (such as from /start)."""
-    uname = bot_username or "WordGridGameBot"
+    """Kurigram premium HTML help view (used when editing a photo caption or fallback)."""
     kb_dict = build_help_keyboard_dict(is_admin=is_admin, active=section, show_back=show_back)
     pyro_markup = markup_dict_to_pyrogram(kb_dict)
 
     if section == "grid":
         text = (
-            "🧩 <b>How to Play Word Grid Arcade</b>\n\n"
-            "<blockquote>"
-            "1. Send <code>/game</code> in a group chat to start Round 1.\n"
-            "2. Find words hidden horizontally, vertically, or diagonally.\n"
-            "3. Check the caption for hints like <code>A _ _ _ E (5L)</code> or tap <b>💡 Hint</b>.\n"
-            "4. Type found words in chat to score points!"
-            "</blockquote>"
+            f"{E_GRID} <b>How to Play Word Grid Arcade</b>\n\n"
+            f"<blockquote>"
+            f"1. Send <code>/game</code> in a group chat to start Round 1.\n"
+            f"2. Find words hidden horizontally, vertically, or diagonally.\n"
+            f"3. Check caption hints like <code>A _ _ _ E (5L)</code> or tap <b>Hint</b>.\n"
+            f"4. Type found words in chat to score points before time runs out!"
+            f"</blockquote>"
         )
     elif section == "scores":
         text = (
-            "🏆 <b>Leaderboard &amp; Scores</b>\n\n"
-            "<blockquote>"
-            "• <code>/leaderboard [global|group] [today|week|month|all] [4|5|6]</code>\n"
-            "• <code>/score [@user] [global|group] [today|week|month|all] [4|5|6]</code>\n"
-            "• <code>/profile</code> — Combined Word Grid &amp; WordSeek card"
-            "</blockquote>"
+            f"{E_TOP} <b>Leaderboard &amp; Scores</b>\n\n"
+            f"<blockquote>"
+            f"• <code>/leaderboard [global|group] [today|week|month|all] [4|5|6]</code>\n"
+            f"• <code>/score [@user] [global|group] [today|week|month|all] [4|5|6]</code>\n"
+            f"• <code>/profile</code> — Combined Word Grid &amp; WordSeek card"
+            f"</blockquote>"
         )
     elif section == "group":
         text = (
-            "⚙️ <b>Group Settings (Admin Only)</b>\n\n"
-            "<blockquote>"
-            "• <code>/seekauth @user</code> / <code>remove</code> / <code>list</code>\n"
-            "• <code>/setgametopic</code> &amp; <code>/unsetgametopic</code>\n"
-            "• <code>/allowonlylen 5 4 6</code>"
-            "</blockquote>"
+            f"{E_SETTINGS} <b>Group Settings (Admin Only)</b>\n\n"
+            f"<blockquote>"
+            f"• <code>/seekauth @user</code> • <code>remove</code> • <code>list</code>\n"
+            f"• <code>/setgametopic</code> &amp; <code>/unsetgametopic</code>\n"
+            f"• <code>/allowonlylen 5 4 6</code>"
+            f"</blockquote>"
         )
     elif section == "other":
         text = (
-            "🆔 <b>Other Commands</b>\n\n"
-            "<blockquote>"
-            "• <code>/id</code> — View chat, user, topic, and message IDs\n"
-            "• <code>/profile</code> — View your player profile card"
-            "</blockquote>"
+            f"{E_FILE} <b>Other Commands</b>\n\n"
+            f"<blockquote>"
+            f"• <code>/id</code> — View chat, user, topic, and message IDs\n"
+            f"• <code>/profile</code> — View your combined player profile card"
+            f"</blockquote>"
         )
     elif section == "admin":
         text = (
-            "👑 <b>Admin Commands</b>\n\n"
-            "<blockquote>"
-            "• <code>/panel</code>, <code>/stats</code>, <code>/broadcast</code>\n"
-            "• <code>/ban [id]</code>, <code>/unban [id]</code>, <code>/transfer &lt;from&gt; &lt;to&gt;</code>"
-            "</blockquote>"
+            f"{E_CROWN} <b>Admin Commands</b>\n\n"
+            f"<blockquote>"
+            f"• <code>/panel</code> • <code>/stats</code> • <code>/broadcast</code>\n"
+            f"• <code>/ban [id]</code> • <code>/unban [id]</code> • <code>/transfer &lt;from&gt; &lt;to&gt;</code>"
+            f"</blockquote>"
         )
     else:
         text = (
-            "🟩 <b>How to Play WordSeek</b>\n\n"
-            "<blockquote>"
-            "1. Start a game using <code>/new</code>, <code>/new4</code>, <code>/new5</code>, or <code>/new6</code>.\n"
-            "2. Guess the hidden word — each letter becomes a colored button in the message:\n"
-            "   🟩 <b>Green:</b> right letter, right spot\n"
-            "   🟨 <b>Default:</b> right letter, wrong spot\n"
-            "   🟥 <b>Red:</b> letter isn't in the word\n"
-            "3. First player to guess wins! Max 30 guesses.\n"
-            "4. Use <code>/daily</code> in DM for the 6-try Word of the Day!"
-            "</blockquote>"
+            f"{E_GAME} <b>How to Play WordSeek</b>\n\n"
+            f"<blockquote>"
+            f"1. Start a game using <code>/new</code>, <code>/new4</code>, <code>/new5</code>, or <code>/new6</code>.\n"
+            f"2. Guess the hidden word — each letter becomes a colored button:\n"
+            f"   {E_VERIFIED} <b>Green:</b> right letter, right spot\n"
+            f"   {E_CLOVER} <b>Default:</b> right letter, wrong spot\n"
+            f"   {E_CROSS} <b>Red:</b> letter isn't in the word\n"
+            f"3. First player to guess wins! Max 30 guesses.\n"
+            f"4. Use <code>/daily</code> in DM for the 6-try Word of the Day!"
+            f"</blockquote>"
         )
     return text, pyro_markup
 
 
 # ============================================================================
-# SHARED START & PROFILE VIEWS
+# SHARED START & PROFILE VIEWS (Kurigram Premium Emoji + Clean Card UI)
 # ============================================================================
 def build_start_view(
     first_name: str, bot_username: str, is_private: bool = True
@@ -436,58 +496,62 @@ def build_start_view(
 
     if not is_private:
         text = (
-            "🎮 <b>WordSeek &amp; Word Grid Ready!</b>\n\n"
-            "<blockquote>"
-            "🟩 <b>WordSeek:</b> <code>/new</code> • <code>/new4</code> • <code>/new5</code> • <code>/new6</code> • <code>/end</code>\n"
-            "🧩 <b>Word Grid:</b> <code>/game</code> • <code>/hint</code> • <code>/stopgame</code>\n"
-            "🏆 <b>Ranks &amp; Scores:</b> <code>/leaderboard</code> • <code>/score</code>"
-            "</blockquote>"
+            f"{E_GAME} <b>WordSeek &amp; Word Grid Ready!</b>\n\n"
+            f"<blockquote>"
+            f"{E_NEW} <b>WordSeek:</b> <code>/new</code> • <code>/new4</code> • <code>/new5</code> • <code>/new6</code> • <code>/end</code>\n"
+            f"{E_GRID} <b>Word Grid:</b> <code>/game</code> • <code>/hint</code> • <code>/stopgame</code>\n"
+            f"{E_TOP} <b>Ranks &amp; Scores:</b> <code>/leaderboard</code> • <code>/score</code>"
+            f"</blockquote>"
         )
         markup = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("🟩 Start Seek", callback_data="ws:new:5"),
-                    InlineKeyboardButton("🧩 Start Grid", callback_data="game:new"),
+                    make_button("Start Seek", callback_data="ws:new:5", icon_id=ID_GAME, fallback_prefix="🟩"),
+                    make_button("Start Grid", callback_data="game:new", icon_id=ID_GRID, fallback_prefix="🧩"),
                 ],
                 [
-                    InlineKeyboardButton("🏆 Ranks", callback_data="wslb:group:all:5"),
-                    InlineKeyboardButton("📖 Help", callback_data="help:howto"),
+                    make_button("Ranks", callback_data="wslb:group:all:5", icon_id=ID_TOP, fallback_prefix="🏆"),
+                    make_button("Help", callback_data="help:howto", icon_id=ID_COMPOSE, fallback_prefix="📖"),
                 ],
             ]
         )
         return text, markup
 
     text = (
-        f"<b>Welcome to WordSeek &amp; Word Grid!</b>\n\n"
-        f"Hey <b>{safe_name}</b>! Play competitive WordSeek (Wordle 4L/5L/6L) and 3D Word Grid directly on Telegram.\n\n"
-        f"<blockquote><b>Quick Start:</b>\n"
-        f"• Use <code>/new</code> (or <code>/new4</code>, <code>/new5</code>, <code>/new6</code>) to start WordSeek\n"
-        f"• Use <code>/daily</code> for WordSeek of the Day (6 attempts)\n"
-        f"• Use <code>/game</code> in a group for 3D Word Grid Arcade\n"
-        f"• Use <code>/help</code> for detailed instructions and command list</blockquote>\n\n"
-        f"Ready to test your word skills? Let's play!"
+        f"{E_WAVE} <b>Welcome to WordSeek &amp; Word Grid!</b>\n\n"
+        f"{E_ANIME_CUTE} Hey <b>{safe_name}</b>! Play competitive <b>WordSeek</b> (4L/5L/6L) and <b>3D Word Grid</b> right inside Telegram.\n\n"
+        f"<blockquote>"
+        f"{E_BOLT} <b>Quick Start</b>\n"
+        f"• <code>/new</code> (<code>/new4</code> • <code>/new5</code> • <code>/new6</code>) — Start WordSeek\n"
+        f"• <code>/daily</code> — WordSeek of the Day (6 attempts)\n"
+        f"• <code>/game</code> — 3D Word Grid Arcade in groups\n"
+        f"• <code>/help</code> — Rules, commands &amp; group setup"
+        f"</blockquote>\n\n"
+        f"{E_CLOVER} <i>Ready to test your vocabulary? Pick a mode below!</i>"
     )
 
     markup = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(
-                    "➕ Add to Group",
+                make_button(
+                    "Add to Group",
                     url=f"https://t.me/{uname}?startgroup=true",
+                    icon_id=ID_ADD,
+                    fallback_prefix="➕",
                 )
             ],
             [
-                InlineKeyboardButton("🟩 Play Seek", callback_data="ws:new:5"),
-                InlineKeyboardButton("🎯 Daily", callback_data="ws:daily"),
+                make_button("Play Seek", callback_data="ws:new:5", icon_id=ID_GAME, fallback_prefix="🟩"),
+                make_button("Daily", callback_data="ws:daily", icon_id=ID_CLOCK24, fallback_prefix="🎯"),
             ],
             [
-                InlineKeyboardButton("🏆 Ranks", callback_data="wslb:global:all:5"),
-                InlineKeyboardButton("👤 Profile", callback_data="nav:profile"),
-                InlineKeyboardButton("📖 Help", callback_data="help:howto"),
+                make_button("Ranks", callback_data="wslb:global:all:5", icon_id=ID_TOP, fallback_prefix="🏆"),
+                make_button("Profile", callback_data="nav:profile", icon_id=ID_USER, fallback_prefix="👤"),
+                make_button("Help", callback_data="help:howto", icon_id=ID_COMPOSE, fallback_prefix="📖"),
             ],
             [
-                InlineKeyboardButton("📢 Updates", url=UPDATE_CHANNEL),
-                InlineKeyboardButton("💬 Discussion", url=SUPPORT_GROUP),
+                make_button("Updates", url=UPDATE_CHANNEL, icon_id=ID_MEGAPHONE, fallback_prefix="📢"),
+                make_button("Support", url=SUPPORT_GROUP, icon_id=ID_CHAT, fallback_prefix="💬"),
             ],
         ]
     )
@@ -517,33 +581,33 @@ def build_profile_view(
     seek_rank_str = f"#{seek_rank}" if seek_rank > 0 else "Unranked"
 
     text = (
-        f"👤 <b>Player Profile — {safe_name}</b>\n\n"
+        f"{E_USER} <b>Player Profile — {safe_name}</b>\n\n"
         f"<blockquote>"
-        f"🟩 <b>WordSeek Stats (5L)</b>\n"
-        f"• <b>Score:</b> <code>{seek_score:,} pts</code> ({seek_rank_str})\n"
-        f"• <b>Daily Streak:</b> <code>{curr_streak} days</code> (Best: <code>{high_streak} days</code>)"
+        f"{E_GAME} <b>WordSeek Stats (5L)</b>\n"
+        f"├ {E_TOP} <b>Score:</b> <code>{seek_score:,} pts</code> ({seek_rank_str})\n"
+        f"└ {E_BOLT} <b>Daily Streak:</b> <code>{curr_streak}d</code>  •  <b>Best:</b> <code>{high_streak}d</code>"
         f"</blockquote>\n"
         f"<blockquote>"
-        f"🧩 <b>Word Grid Arcade</b>\n"
-        f"• <b>Score:</b> <code>{grid_score:,} pts</code> ({grid_rank_str})\n"
-        f"• <b>Words Found:</b> <code>{words_found:,}</code>  |  <b>Best:</b> <code>Round {best_round}</code>"
+        f"{E_GRID} <b>Word Grid Arcade</b>\n"
+        f"├ {E_CROWN} <b>Score:</b> <code>{grid_score:,} pts</code> ({grid_rank_str})\n"
+        f"└ {E_CHECK} <b>Words:</b> <code>{words_found:,}</code>  •  <b>Best:</b> <code>Round {best_round}</code>"
         f"</blockquote>"
     )
 
     rows = [
         [
-            InlineKeyboardButton("🔄 Refresh", callback_data="profile:refresh"),
-            InlineKeyboardButton("🏆 Ranks", callback_data="wslb:global:all:5"),
+            make_button("Refresh", callback_data="profile:refresh", icon_id=ID_REFRESH, fallback_prefix="🔄"),
+            make_button("Ranks", callback_data="wslb:global:all:5", icon_id=ID_TOP, fallback_prefix="🏆"),
         ]
     ]
     if show_back:
-        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="nav:home")])
+        rows.append([make_button("Back", callback_data="nav:home", icon_id=ID_SKIP, fallback_prefix="⬅️")])
 
     return text, InlineKeyboardMarkup(rows)
 
 
 # ============================================================================
-# BOT API 10.3 STYLED LEADERBOARD & SCORE KEYBOARDS (style="primary" / "success")
+# BOT API 10.3 STYLED LEADERBOARD & SCORE KEYBOARDS (Icons + Color Styles)
 # ============================================================================
 def build_seek_filter_keyboard_dict(
     search_key: str,
@@ -554,53 +618,47 @@ def build_seek_filter_keyboard_dict(
     show_back: bool = False,
 ) -> dict:
     """
-    Ported from WordSeek-master's `generate-leaderboard-keyboard.ts`.
-    Sets `"style": "primary"` (Blue) on active filter buttons and `"style": "success"` (Green) on support!
+    Sets `"style": "primary"` (Blue) on active filter buttons,
+    `"style": "success"` (Green) on support, and custom emoji icons.
     """
     rows = []
 
     if include_game_switch:
         rows.append(
             [
-                {
-                    "text": "« 🟩 WordSeek »",
-                    "callback_data": f"{prefix}:{search_key}:{time_key}:{word_length}",
-                    "style": "primary",
-                },
-                {
-                    "text": "🧩 Word Grid",
-                    "callback_data": "lb:users",
-                },
+                make_api_button(
+                    "« WordSeek »",
+                    callback_data=f"{prefix}:{search_key}:{time_key}:{word_length}",
+                    icon_id=ID_GAME,
+                    style="primary",
+                ),
+                make_api_button(
+                    "Word Grid",
+                    callback_data="lb:users",
+                    icon_id=ID_GRID,
+                ),
             ]
         )
 
-    # Scope row: Global | 🔄 | This chat
-    g_btn = {
-        "text": _fmt_tab("Global", search_key == "global"),
-        "callback_data": f"{prefix}:global:{time_key}:{word_length}",
-    }
-    if search_key == "global":
-        g_btn["style"] = "primary"
-
-    c_btn = {
-        "text": _fmt_tab("This chat", search_key == "group"),
-        "callback_data": f"{prefix}:group:{time_key}:{word_length}",
-    }
-    if search_key == "group":
-        c_btn["style"] = "primary"
-
-    rows.append(
-        [
-            g_btn,
-            {
-                "text": "🔄",
-                "callback_data": f"{prefix}:{search_key}:{time_key}:{word_length}:r",
-            },
-            c_btn,
-        ]
+    # Scope row: Global | Refresh | This chat
+    g_btn = make_api_button(
+        _fmt_tab("Global", search_key == "global"),
+        callback_data=f"{prefix}:global:{time_key}:{word_length}",
+        style="primary" if search_key == "global" else None,
     )
+    ref_btn = make_api_button(
+        "",
+        callback_data=f"{prefix}:{search_key}:{time_key}:{word_length}:r",
+        icon_id=ID_REFRESH,
+    )
+    c_btn = make_api_button(
+        _fmt_tab("This chat", search_key == "group"),
+        callback_data=f"{prefix}:group:{time_key}:{word_length}",
+        style="primary" if search_key == "group" else None,
+    )
+    rows.append([g_btn, ref_btn, c_btn])
 
-    # Time period rows (3 per row, just like generate-leaderboard-keyboard.ts)
+    # Time period rows (3 per row)
     time_items = [
         ("today", "Today"),
         ("week", "This week"),
@@ -610,13 +668,13 @@ def build_seek_filter_keyboard_dict(
     ]
     t_row = []
     for t_k, t_label in time_items:
-        b = {
-            "text": _fmt_tab(t_label, time_key == t_k),
-            "callback_data": f"{prefix}:{search_key}:{t_k}:{word_length}",
-        }
-        if time_key == t_k:
-            b["style"] = "primary"
-        t_row.append(b)
+        t_row.append(
+            make_api_button(
+                _fmt_tab(t_label, time_key == t_k),
+                callback_data=f"{prefix}:{search_key}:{t_k}:{word_length}",
+                style="primary" if time_key == t_k else None,
+            )
+        )
         if len(t_row) == 3:
             rows.append(t_row)
             t_row = []
@@ -624,26 +682,25 @@ def build_seek_filter_keyboard_dict(
         rows.append(t_row)
 
     # Word length row: 4 letters | 5 letters | 6 letters
-    len_row = []
-    for ln in (4, 5, 6):
-        b = {
-            "text": _fmt_tab(f"{ln} letters", word_length == ln),
-            "callback_data": f"{prefix}:{search_key}:{time_key}:{ln}",
-        }
-        if word_length == ln:
-            b["style"] = "primary"
-        len_row.append(b)
+    len_row = [
+        make_api_button(
+            _fmt_tab(f"{ln} letters", word_length == ln),
+            callback_data=f"{prefix}:{search_key}:{time_key}:{ln}",
+            style="primary" if word_length == ln else None,
+        )
+        for ln in (4, 5, 6)
+    ]
     rows.append(len_row)
 
     rows.append(
         [
-            {"text": "📢 Updates", "url": UPDATE_CHANNEL},
-            {"text": "💬 Discussion", "url": SUPPORT_GROUP, "style": "success"},
+            make_api_button("Updates", url=UPDATE_CHANNEL, icon_id=ID_MEGAPHONE),
+            make_api_button("Support", url=SUPPORT_GROUP, icon_id=ID_CHAT, style="success"),
         ]
     )
 
     if show_back:
-        rows.append([{"text": "⬅️ Back", "callback_data": "nav:home"}])
+        rows.append([make_api_button("Back", callback_data="nav:home", icon_id=ID_SKIP)])
 
     return {"inline_keyboard": rows}
 
@@ -656,20 +713,21 @@ def build_seek_score_view(
     time_key: str = "all",
     word_length: int = 5,
 ) -> tuple[str, InlineKeyboardMarkup, dict]:
-    """
-    Ported from WordSeek's `formatUserScoreMessage` + `generateLeaderboardKeyboard`.
-    Returns `(text_html, pyrogram_markup, bot_api_styled_markup_dict)`.
-    """
+    """Returns `(text_html, kurigram_markup, bot_api_styled_markup_dict)`."""
     safe_name = normalize_fancy_telegram_name((score_data or {}).get("name") or target_name)
     uname = (score_data or {}).get("username")
     mention = f'<a href="https://t.me/{uname}">{safe_name}</a>' if uname else safe_name
     scope_text = "globally" if search_key == "global" else "in this chat"
 
-    if not score_data or (score_data.get("total_score", 0) == 0 and score_data.get("highest_streak", 0) == 0):
+    if not score_data or (
+        score_data.get("total_score", 0) == 0 and score_data.get("highest_streak", 0) == 0
+    ):
         text = (
-            f"<blockquote><strong>🏆 Regular WordSeek Scores ({word_length}L)</strong></blockquote>\n"
-            f"<b>{mention}</b> has no scores recorded {scope_text} for this period yet.\n\n"
-            f"<i>Start a game with <code>/new{word_length}</code> or play <code>/daily</code>!</i>"
+            f"{E_TOP} <b>WordSeek Scores ({word_length}L)</b>\n\n"
+            f"<blockquote>"
+            f"{E_USER} <b>{mention}</b> has no scores recorded {scope_text} for this period yet.\n"
+            f"{E_NEW} <i>Start with <code>/new{word_length}</code> or play <code>/daily</code>!</i>"
+            f"</blockquote>"
         )
     else:
         tot = score_data.get("total_score", 0)
@@ -677,12 +735,17 @@ def build_seek_score_view(
         c_str = score_data.get("current_streak", 0)
         h_str = score_data.get("highest_streak", 0)
         text = (
-            f"<blockquote><strong>🏆 Regular WordSeek Scores</strong></blockquote>\n"
-            f"<b>{mention}</b> has a total score of <b>{tot:,}</b> {scope_text}.\n"
-            f"Their rank is <b>#{rnk:,}</b>.\n\n"
-            f"<blockquote><strong>🔥 Daily WordSeek Stats</strong></blockquote>\n"
-            f"<b>Current Streak:</b> {c_str} days\n"
-            f"<b>Highest Streak:</b> {h_str} days"
+            f"{E_TOP} <b>WordSeek Scores ({word_length}L)</b>\n\n"
+            f"<blockquote>"
+            f"{E_USER} <b>Player:</b> {mention}\n"
+            f"{E_GIFT} <b>Total Score:</b> <code>{tot:,} pts</code> ({scope_text})\n"
+            f"{E_CROWN} <b>Rank:</b> <code>#{rnk:,}</code>"
+            f"</blockquote>\n"
+            f"<blockquote>"
+            f"{E_CLOCK24} <b>Daily WordSeek Streak</b>\n"
+            f"├ {E_BOLT} <b>Current:</b> <code>{c_str} days</code>\n"
+            f"└ {E_BEST} <b>Highest:</b> <code>{h_str} days</code>"
+            f"</blockquote>"
         )
 
     prefix = f"wsscore:{target_id}"
@@ -697,19 +760,28 @@ def build_seek_leaderboard_view(
     word_length: int = 5,
     show_back: bool = False,
 ) -> tuple[str, InlineKeyboardMarkup, dict]:
-    """
-    Ported from WordSeek's `formatLeaderboardMessage` + `generateLeaderboardKeyboard`.
-    Returns `(text_html, pyrogram_markup, bot_api_styled_markup_dict)`.
-    """
+    """Returns `(text_html, kurigram_markup, bot_api_styled_markup_dict)`."""
     scope_title = "Global" if search_key == "global" else "Group"
-    header = f"<blockquote>🏆 {scope_title} Leaderboard 🏆</blockquote>\n\n"
+    header = f"{E_TOP} <b>{scope_title} WordSeek Leaderboard ({word_length}L)</b>\n\n"
 
     if not entries:
-        body = f"<blockquote>No scores recorded yet! Start a game with <code>/new{word_length}</code>.</blockquote>"
+        body = (
+            f"<blockquote>"
+            f"{E_GAME} No scores recorded yet! Start a game with <code>/new{word_length}</code>."
+            f"</blockquote>"
+        )
     else:
         blocks: list[list[str]] = []
         for index, entry in enumerate(entries[:20]):
-            rank_icon = ["🥇", "🥈", "🥉"][index] if index < 3 else "🔅"
+            if index == 0:
+                rank_icon = f"{E_BEST}"
+            elif index == 1:
+                rank_icon = "🥈"
+            elif index == 2:
+                rank_icon = "🥉"
+            else:
+                rank_icon = f"<code>{index + 1}.</code>"
+
             name = normalize_fancy_telegram_name(entry.get("name", "Player"), max_len=24)
             uname = entry.get("username")
             uid = entry.get("user_id", 0)
@@ -722,7 +794,7 @@ def build_seek_leaderboard_view(
             else:
                 user_link = name
 
-            line = f"{rank_icon}{user_link} - {pts:,} pts"
+            line = f"{rank_icon} {user_link} — <b>{pts:,}</b> pts"
             if index == 0 or index == 3 or (index > 3 and (index - 3) % 10 == 0):
                 blocks.append([])
             blocks[-1].append(line)
@@ -746,61 +818,59 @@ def build_leaderboard_view(
     show_back: bool = True,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Word Grid Arcade Leaderboard with Dual Game switcher to WordSeek Leaderboard."""
-    medals = {0: "🥇", 1: "🥈", 2: "🥉"}
-
     if mode == "groups":
-        header = "<blockquote>🏆 <b>Word Grid — Top Groups</b></blockquote>\n\n"
+        header = f"{E_TOP} <b>Word Grid — Top Groups</b>\n\n"
         if not entries:
-            body = "<blockquote>No groups have scored yet! Send <code>/game</code> in your group.</blockquote>"
+            body = f"<blockquote>{E_GRID} No groups have scored yet! Send <code>/game</code> in your group.</blockquote>"
         else:
             lines = []
             for idx, g in enumerate(entries[:10]):
-                badge = medals.get(idx, "🔅")
+                badge = E_BEST if idx == 0 else ("🥈" if idx == 1 else ("🥉" if idx == 2 else f"<code>{idx + 1}.</code>"))
                 title = normalize_fancy_telegram_name(g.get("title", "Group"), max_len=24)
                 score = g.get("score", 0)
                 best_r = g.get("best_round", 1)
-                lines.append(f"{badge} <b>{title}</b> - {score:,} pts <i>(R{best_r})</i>")
+                lines.append(f"{badge} <b>{title}</b> — <code>{score:,}</code> pts <i>(R{best_r})</i>")
             body = "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
         tabs = [
-            InlineKeyboardButton("👤 Players", callback_data="lb:users"),
-            InlineKeyboardButton("« 👥 Groups »", callback_data="lb:groups"),
+            make_button("Players", callback_data="lb:users", icon_id=ID_USER, fallback_prefix="👤"),
+            make_button("« Groups »", callback_data="lb:groups", icon_id=ID_CHAT, fallback_prefix="👥"),
         ]
         refresh_cb = "lb:refresh:groups"
     else:
-        header = "<blockquote>🏆 <b>Word Grid — Top Players</b></blockquote>\n\n"
+        header = f"{E_TOP} <b>Word Grid — Top Players</b>\n\n"
         if not entries:
-            body = "<blockquote>No players have scored yet! Send <code>/game</code> to play.</blockquote>"
+            body = f"<blockquote>{E_GRID} No players have scored yet! Send <code>/game</code> to play.</blockquote>"
         else:
             lines = []
             for idx, u in enumerate(entries[:10]):
-                badge = medals.get(idx, "🔅")
+                badge = E_BEST if idx == 0 else ("🥈" if idx == 1 else ("🥉" if idx == 2 else f"<code>{idx + 1}.</code>"))
                 name = normalize_fancy_telegram_name(u.get("first_name", "Player"), max_len=22)
                 uid = u.get("user_id", 0)
                 score = u.get("score", 0)
                 user_link = f'<a href="tg://user?id={uid}">{name}</a>' if uid else f"<b>{name}</b>"
-                lines.append(f"{badge} {user_link} - {score:,} pts")
+                lines.append(f"{badge} {user_link} — <code>{score:,}</code> pts")
             body = "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
         tabs = [
-            InlineKeyboardButton("« 👤 Players »", callback_data="lb:users"),
-            InlineKeyboardButton("👥 Groups", callback_data="lb:groups"),
+            make_button("« Players »", callback_data="lb:users", icon_id=ID_USER, fallback_prefix="👤"),
+            make_button("Groups", callback_data="lb:groups", icon_id=ID_CHAT, fallback_prefix="👥"),
         ]
         refresh_cb = "lb:refresh:users"
 
     rows = [
         [
-            InlineKeyboardButton("🟩 WordSeek", callback_data="wslb:global:all:5"),
-            InlineKeyboardButton("« 🧩 Word Grid »", callback_data="lb:users"),
+            make_button("WordSeek", callback_data="wslb:global:all:5", icon_id=ID_GAME, fallback_prefix="🟩"),
+            make_button("« Word Grid »", callback_data="lb:users", icon_id=ID_GRID, fallback_prefix="🧩"),
         ],
         tabs,
         [
-            InlineKeyboardButton("🔄 Refresh", callback_data=refresh_cb),
-            InlineKeyboardButton("👤 Profile", callback_data="nav:profile"),
+            make_button("Refresh", callback_data=refresh_cb, icon_id=ID_REFRESH, fallback_prefix="🔄"),
+            make_button("Profile", callback_data="nav:profile", icon_id=ID_USER, fallback_prefix="👤"),
         ],
     ]
     if show_back:
-        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="nav:home")])
+        rows.append([make_button("Back", callback_data="nav:home", icon_id=ID_SKIP, fallback_prefix="⬅️")])
 
     return header + body, InlineKeyboardMarkup(rows)
 
@@ -814,20 +884,20 @@ def build_admin_view(
 ) -> tuple[str, InlineKeyboardMarkup]:
     if section == "stats":
         text = (
-            "📊 <b>Bot Live Statistics</b>\n\n"
-            "<blockquote>"
-            f"👤 <b>Total Users:</b> <code>{total_users:,}</code>\n"
-            f"👥 <b>Total Groups:</b> <code>{total_groups:,}</code>\n"
-            f"🧩 <b>Active Grid Games:</b> <code>{active_grid_games}</code>\n"
-            f"🟩 <b>Active Seek Games:</b> <code>{active_seek_games}</code>"
-            "</blockquote>\n"
-            "⚡ <i>Motor pool &amp; TTL cache healthy.</i>"
+            f"{E_STATS} <b>Bot Live Statistics</b>\n\n"
+            f"<blockquote>"
+            f"{E_USER} <b>Total Users:</b> <code>{total_users:,}</code>\n"
+            f"{E_CHAT} <b>Total Groups:</b> <code>{total_groups:,}</code>\n"
+            f"{E_GRID} <b>Active Grid Games:</b> <code>{active_grid_games}</code>\n"
+            f"{E_GAME} <b>Active Seek Games:</b> <code>{active_seek_games}</code>"
+            f"</blockquote>\n"
+            f"{E_BOLT} <i>Motor pool &amp; TTL cache healthy.</i>"
         )
         markup = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("🔄 Refresh", callback_data="admin:stats"),
-                    InlineKeyboardButton("⬅️ Back", callback_data="admin:home"),
+                    make_button("Refresh", callback_data="admin:stats", icon_id=ID_REFRESH, fallback_prefix="🔄"),
+                    make_button("Back", callback_data="admin:home", icon_id=ID_SKIP, fallback_prefix="⬅️"),
                 ]
             ]
         )
@@ -835,31 +905,31 @@ def build_admin_view(
 
     if section == "broadcast":
         text = (
-            "📢 <b>Admin Broadcast</b>\n\n"
-            "<blockquote>"
-            "Reply to any message with <code>/broadcast</code> to send it to all users and groups with FloodWait protection.\n\n"
-            "<b>Other Owner Commands:</b>\n"
-            "• <code>/stats</code> — Detailed system &amp; RAM metrics\n"
-            "• <code>/ban [user_id]</code> &amp; <code>/unban [user_id]</code>\n"
-            "• <code>/transfer &lt;from_id&gt; &lt;to_id&gt;</code>"
-            "</blockquote>"
+            f"{E_MEGAPHONE} <b>Admin Broadcast</b>\n\n"
+            f"<blockquote>"
+            f"Reply to any message with <code>/broadcast</code> to send it to all users and groups with FloodWait protection.\n\n"
+            f"{E_CROWN} <b>Owner Commands:</b>\n"
+            f"• <code>/stats</code> — Detailed system &amp; runtime metrics\n"
+            f"• <code>/ban [user_id]</code> &amp; <code>/unban [user_id]</code>\n"
+            f"• <code>/transfer &lt;from_id&gt; &lt;to_id&gt;</code>"
+            f"</blockquote>"
         )
         markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Back", callback_data="admin:home")]]
+            [[make_button("Back", callback_data="admin:home", icon_id=ID_SKIP, fallback_prefix="⬅️")]]
         )
         return text, markup
 
     text = (
-        "🛠 <b>Admin Control Panel</b>\n\n"
-        "<blockquote>"
-        "Manage Word Grid Arcade &amp; WordSeek statistics, active games, user moderation, and broadcasts."
-        "</blockquote>"
+        f"{E_CROWN} <b>Admin Control Panel</b>\n\n"
+        f"<blockquote>"
+        f"{E_ROBOT} Manage Word Grid Arcade &amp; WordSeek statistics, active games, user moderation, and broadcasts."
+        f"</blockquote>"
     )
     markup = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("📊 Stats", callback_data="admin:stats"),
-                InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcast"),
+                make_button("Stats", callback_data="admin:stats", icon_id=ID_STATS, fallback_prefix="📊"),
+                make_button("Broadcast", callback_data="admin:broadcast", icon_id=ID_MEGAPHONE, fallback_prefix="📢"),
             ]
         ]
     )

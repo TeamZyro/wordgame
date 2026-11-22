@@ -15,6 +15,11 @@ from bot.utils.views import (
     normalize_fancy_telegram_name,
 )
 from bot.utils.rich_api import send_styled_message
+from bot.utils.command_filter import bot_command
+from bot.utils.emojis import (
+    E_GAME, E_GRID, E_TIMER, E_SEARCH, E_LOOP, E_LOADING, E_CROSS,
+    E_WARN, E_STOP, E_CLOVER, E_HOURGLASS, E_VERIFIED, E_BEST, E_LEVELUP, E_BOLT,
+)
 from bot.utils.cooldown import (
     check_cooldown,
     get_chat_lock,
@@ -151,9 +156,9 @@ async def game_timeout_monitor(client: Client, chat_id: int, game_id: str, round
         missed_str = ", ".join(f"<code>{w}</code>" for w in missed) if missed else "None"
 
         timeout_banner = (
-            f"⏰ <b>TIME UP! Round {round_num} Expired.</b>\n"
-            f"🔍 <b>Missed:</b> {missed_str}\n"
-            f"🔄 <i>Streak reset to Round 1. Tap <b>▶️ Play Again</b> or send <code>/game</code>!</i>"
+            f"{E_TIMER} <b>TIME UP! Round {round_num} Expired.</b>\n"
+            f"{E_SEARCH} <b>Missed:</b> {missed_str}\n"
+            f"{E_LOOP} <i>Streak reset to Round 1. Tap <b>Play Again</b> or send <code>/game</code>!</i>"
         )
 
     await safe_tg_call(
@@ -168,12 +173,12 @@ async def game_timeout_monitor(client: Client, chat_id: int, game_id: str, round
         client.send_message,
         chat_id,
         (
-            f"⏰ <b>ROUND {round_num} — TIME UP!</b>\n\n"
+            f"{E_TIMER} <b>ROUND {round_num} — TIME UP!</b>\n\n"
             f"<blockquote>"
-            f"🔍 <b>Unfound Words:</b> {missed_str}\n"
-            f"📉 <b>Streak:</b> Reset to <b>Round 1</b>"
+            f"{E_SEARCH} <b>Unfound Words:</b> {missed_str}\n"
+            f"{E_LOOP} <b>Streak:</b> Reset to <b>Round 1</b>"
             f"</blockquote>\n"
-            f"🎮 Tap below or send <code>/game</code> to play again!"
+            f"{E_GAME} Tap below or send <code>/game</code> to play again!"
         ),
         reply_markup=build_game_board_markup(solved=True),
     )
@@ -195,12 +200,12 @@ async def execute_round(client: Client, chat_id: int, status_message: Message | 
             status_message = await safe_tg_call(
                 client.send_message,
                 chat_id,
-                f"🔄 <b>Generating Round {round_num} Word Grid...</b>",
+                f"{E_LOADING} <b>Generating Round {round_num} Word Grid...</b>",
             )
         else:
             await safe_tg_call(
                 status_message.edit_text,
-                f"🔄 <b>Generating Round {round_num} Word Grid...</b>",
+                f"{E_LOADING} <b>Generating Round {round_num} Word Grid...</b>",
             )
 
         grid, words_info, theme_name = await asyncio.to_thread(
@@ -210,7 +215,7 @@ async def execute_round(client: Client, chat_id: int, status_message: Message | 
             if status_message:
                 await safe_tg_call(
                     status_message.edit_text,
-                    "❌ <b>Could not build puzzle board. Please try <code>/game</code> again.</b>",
+                    f"{E_CROSS} <b>Could not build puzzle board. Please try <code>/game</code> again.</b>",
                 )
             return
 
@@ -290,7 +295,7 @@ async def _auto_advance_round(client: Client, chat_id: int, expected_game_id: st
         return
 
 
-@Client.on_message(filters.command(["game", "stopgame", "hint"]))
+@Client.on_message(bot_command(["game", "stopgame", "hint"]))
 async def game_commands(client: Client, message: Message):
     user = message.from_user
     if user and await is_user_banned(user.id):
@@ -300,7 +305,7 @@ async def game_commands(client: Client, message: Message):
         await safe_tg_call(
             message.reply_text,
             (
-                "⛔️ <b>Word Grid is for Groups!</b>\n\n"
+                f"{E_WARN} <b>Word Grid is for Groups!</b>\n\n"
                 "<blockquote>Add me to a group for 3D Word Grid (<code>/game</code>), "
                 "or play <b>WordSeek</b> right here in DM using <code>/new</code> or <code>/daily</code>!</blockquote>"
             ),
@@ -330,19 +335,19 @@ async def game_commands(client: Client, message: Message):
                     message_id=game["message_id"],
                     caption=build_game_caption(
                         game,
-                        status_banner="🛑 <b>Game stopped. Progress reset to Round 1.</b>",
+                        status_banner=f"{E_STOP} <b>Game stopped. Progress reset to Round 1.</b>",
                     ),
                     reply_markup=build_game_board_markup(solved=True),
                 )
                 await safe_tg_call(
                     message.reply_text,
-                    f"🛑 <b>Round {stopped_round} Stopped!</b>\n<i>Progress reset to Round 1. Send <code>/game</code> to play again.</i>",
+                    f"{E_STOP} <b>Round {stopped_round} Stopped!</b>\n<i>Progress reset to Round 1. Send <code>/game</code> to play again.</i>",
                 )
             else:
                 cancel_game_tasks(chat_id)
                 await safe_tg_call(
                     message.reply_text,
-                    "ℹ️ <b>No active Word Grid game running.</b>\n<i>Send <code>/game</code> to start Round 1!</i>",
+                    f"{E_GRID} <b>No active Word Grid game running.</b>\n<i>Send <code>/game</code> to start Round 1!</i>",
                 )
         return
 
@@ -354,7 +359,7 @@ async def game_commands(client: Client, message: Message):
     if not allowed_chat:
         await safe_tg_call(
             message.reply_text,
-            f"⏳ <b>Wait {chat_wait}s before starting a new round!</b>",
+            f"{E_HOURGLASS} <b>Wait {chat_wait}s before starting a new round!</b>",
         )
         return
 
@@ -368,8 +373,8 @@ async def game_commands(client: Client, message: Message):
                     await safe_tg_call(
                         message.reply_text,
                         (
-                            f"⚠️ <b>Round {active['round']} is already running!</b>\n"
-                            f"⏱ <b>Remaining:</b> <code>{time_left}s</code>  •  Use <code>/stopgame</code> to end."
+                            f"{E_WARN} <b>Round {active['round']} is already running!</b>\n"
+                            f"{E_TIMER} <b>Remaining:</b> <code>{time_left}s</code>  •  Use <code>/stopgame</code> to end."
                         ),
                     )
                     return
@@ -379,7 +384,7 @@ async def game_commands(client: Client, message: Message):
         await add_group(chat_id, message.chat.title)
         group_rounds[chat_id] = 1
 
-    m = await safe_tg_call(message.reply_text, "🎮 <b>Starting Word Grid — Round 1...</b>")
+    m = await safe_tg_call(message.reply_text, f"{E_GRID} <b>Starting Word Grid — Round 1...</b>")
     await execute_round(client, chat_id, m)
 
 
@@ -397,7 +402,7 @@ async def _handle_hint_request(
             elif message:
                 await safe_tg_call(
                     message.reply_text,
-                    "⚠️ <b>No active Word Grid running!</b> Send <code>/game</code> to start.",
+                    f"{E_WARN} <b>No active Word Grid running!</b> Send <code>/game</code> to start.",
                 )
             return
 
@@ -456,7 +461,7 @@ async def _handle_hint_request(
     elif message:
         await safe_tg_call(
             message.reply_text,
-            f"💡 <b>Hint:</b> <code>{new_hint}</code> <b>({len(target_word)}L)</b>  •  <i>{hints_left} left</i>",
+            f"{E_CLOVER} <b>Hint:</b> <code>{new_hint}</code> <b>({len(target_word)}L)</b>  •  <i>{hints_left} left</i>",
         )
 
 
@@ -534,7 +539,7 @@ async def game_board_callbacks(client: Client, query: CallbackQuery):
                 message_id=game["message_id"],
                 caption=build_game_caption(
                     game,
-                    status_banner=f"🛑 <b>Stopped by {stopped_by}. Reset to Round 1.</b>",
+                    status_banner=f"{E_STOP} <b>Stopped by {stopped_by}. Reset to Round 1.</b>",
                 ),
                 reply_markup=build_game_board_markup(solved=True),
             )
@@ -567,7 +572,7 @@ async def game_board_callbacks(client: Client, query: CallbackQuery):
 @Client.on_message(
     filters.text
     & ~filters.bot
-    & ~filters.command(ALL_KNOWN_COMMANDS),
+    & ~bot_command(ALL_KNOWN_COMMANDS),
     group=1,
 )
 async def check_answer(client: Client, message: Message):
@@ -602,7 +607,7 @@ async def check_answer(client: Client, message: Message):
             group_rounds[chat_id] = 1
             await safe_tg_call(
                 message.reply_text,
-                f"⏰ <b>TIME UP!</b>\nRound {game['round']} expired. Reset to Round 1.\nSend <code>/game</code> to play again!",
+                f"{E_TIMER} <b>TIME UP!</b>\nRound {game['round']} expired. Reset to Round 1.\nSend <code>/game</code> to play again!",
                 quote=True,
             )
             return
@@ -615,7 +620,7 @@ async def check_answer(client: Client, message: Message):
             finder_name = normalize_fancy_telegram_name(word_info["found_by"], max_len=18)
             await safe_tg_call(
                 message.reply_text,
-                f"⚠️ <code>{user_word}</code> was already found by <b>{finder_name}</b>!",
+                f"{E_WARN} <code>{user_word}</code> was already found by <b>{finder_name}</b>!",
                 quote=True,
             )
             return
@@ -666,7 +671,7 @@ async def check_answer(client: Client, message: Message):
     safe_finder = normalize_fancy_telegram_name(user.first_name, max_len=20)
 
     if all_found:
-        cleared_banner = f"🎊 <b>ROUND {cleared_round} CLEARED in {time_taken}s!</b>"
+        cleared_banner = f"{E_BEST} <b>ROUND {cleared_round} CLEARED in {time_taken}s!</b>"
         await _update_board_media(client, chat_id, game, status_banner=cleared_banner)
 
         mvp_lines = []
@@ -675,17 +680,17 @@ async def check_answer(client: Client, message: Message):
         )
         for idx, c in enumerate(sorted_contributors[:5]):
             c_name = normalize_fancy_telegram_name(c["name"], max_len=18)
-            medal = "🏅" if idx == 0 else "•"
+            medal = E_BEST if idx == 0 else "•"
             mvp_lines.append(f"{medal} <b>{c_name}:</b> <code>+{c['pts']} pts</code> ({c['words']}w)")
         mvp_block = "\n".join(mvp_lines)
 
         await safe_tg_call(
             message.reply_text,
             (
-                f"🎯 <b>{safe_finder}</b> found <code>{user_word}</code> (<b>+{points} pts</b>)!\n\n"
-                f"🎊 <b>ROUND {cleared_round} CLEARED IN {time_taken}s!</b> 🎊\n"
+                f"{E_VERIFIED} <b>{safe_finder}</b> found <code>{user_word}</code> (<b>+{points} pts</b>)!\n\n"
+                f"{E_BEST} <b>ROUND {cleared_round} CLEARED IN {time_taken}s!</b>\n"
                 f"<blockquote>{mvp_block}</blockquote>\n"
-                f"🔥 <i>Next Round {next_round} in 3 seconds...</i>"
+                f"{E_LEVELUP} <i>Next Round {next_round} in 3 seconds...</i>"
             ),
         )
 
@@ -698,7 +703,7 @@ async def check_answer(client: Client, message: Message):
         rem = sum(1 for info in game["words"].values() if info["found_by"] is None)
         await safe_tg_call(
             message.reply_text,
-            f"🎉 <b>{safe_finder}</b> found <code>{user_word}</code>! (<b>+{points} pts</b>)  •  <i>{rem} left</i>",
+            f"{E_VERIFIED} <b>{safe_finder}</b> found <code>{user_word}</code>! (<b>+{points} pts</b>)  •  <i>{rem} left</i>",
             quote=True,
         )
 
@@ -741,7 +746,7 @@ def _parse_leaderboard_args(args: list[str], is_private: bool) -> tuple[bool, st
     return not is_grid, search_key, time_key, word_length
 
 
-@Client.on_message(filters.command(["leaderboard", "top"]))
+@Client.on_message(bot_command(["leaderboard", "top"]))
 async def leaderboard_command(client: Client, message: Message):
     user = message.from_user
     if user:

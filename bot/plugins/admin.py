@@ -11,19 +11,24 @@ from bot.database import db
 from bot.plugins.game import active_games
 from bot.plugins.wordseek import active_seek_games
 from bot.utils.cooldown import check_cooldown, safe_tg_call
+from bot.utils.command_filter import bot_command
 from bot.utils.views import build_admin_view, normalize_fancy_telegram_name
+from bot.utils.emojis import (
+    E_ROBOT, E_STATS, E_USER, E_CHAT, E_GRID, E_GAME, E_CLOCK24,
+    E_SETTINGS, E_VERIFIED, E_BAN, E_MEGAPHONE, E_CROSS, E_WARN, E_BOLT,
+)
 
 logger = logging.getLogger("WordGridBot.Admin")
 BOT_START_TIME = time.monotonic()
 
 
-@Client.on_message(filters.command(["panel", "admin"]) & filters.user(SUDO_USERS))
+@Client.on_message(bot_command(["panel", "admin"]) & filters.user(SUDO_USERS))
 async def admin_panel(client: Client, message: Message):
     text, markup = build_admin_view(section="home")
     await safe_tg_call(message.reply_text, text, reply_markup=markup)
 
 
-@Client.on_message(filters.command(["stats"]) & filters.user(SUDO_USERS))
+@Client.on_message(bot_command(["stats"]) & filters.user(SUDO_USERS))
 async def stats_command(client: Client, message: Message):
     total_users = await db.get_total_users(force_refresh=True)
     total_groups = await db.get_total_groups(force_refresh=True)
@@ -35,26 +40,26 @@ async def stats_command(client: Client, message: Message):
     minutes, seconds = divmod(rem, 60)
 
     text = (
-        "🤖 <b>Word Arcade &amp; WordSeek — System Stats</b>\n\n"
+        f"{E_ROBOT} <b>Word Arcade &amp; WordSeek — System Stats</b>\n\n"
         "<blockquote>"
-        f"📊 <b>Bot Overview</b>\n"
-        f"├ 👤 Total Users: <code>{total_users:,}</code>\n"
-        f"├ 👥 Total Groups: <code>{total_groups:,}</code>\n"
-        f"├ 🧩 Active Grid Games: <code>{running_grid}</code>\n"
-        f"├ 🟩 Active Seek Games: <code>{running_seek}</code>\n"
-        f"└ ⏱ Uptime: <code>{hours}h {minutes}m {seconds}s</code>"
+        f"{E_STATS} <b>Bot Overview</b>\n"
+        f"├ {E_USER} Total Users: <code>{total_users:,}</code>\n"
+        f"├ {E_CHAT} Total Groups: <code>{total_groups:,}</code>\n"
+        f"├ {E_GRID} Active Grid Games: <code>{running_grid}</code>\n"
+        f"├ {E_GAME} Active Seek Games: <code>{running_seek}</code>\n"
+        f"└ {E_CLOCK24} Uptime: <code>{hours}h {minutes}m {seconds}s</code>"
         "</blockquote>\n"
         "<blockquote>"
-        f"💻 <b>Runtime Environment</b>\n"
-        f"├ 🐍 Python: <code>{platform.python_version()}</code>\n"
-        f"├ 🖥 OS: <code>{platform.system()} {platform.machine()}</code>\n"
-        f"└ 🔢 PID: <code>{os.getpid()}</code>"
+        f"{E_SETTINGS} <b>Runtime Environment</b>\n"
+        f"├ {E_BOLT} Python: <code>{platform.python_version()}</code>\n"
+        f"├ {E_ROBOT} OS: <code>{platform.system()} {platform.machine()}</code>\n"
+        f"└ {E_GRID} PID: <code>{os.getpid()}</code>"
         "</blockquote>"
     )
     await safe_tg_call(message.reply_text, text, quote=True)
 
 
-@Client.on_message(filters.command(["ban", "unban", "transfer"]) & filters.user(SUDO_USERS))
+@Client.on_message(bot_command(["ban", "unban", "transfer"]) & filters.user(SUDO_USERS))
 async def moderation_commands(client: Client, message: Message):
     cmd = message.command[0].lower()
     args = message.command[1:] if message.command and len(message.command) > 1 else []
@@ -63,7 +68,7 @@ async def moderation_commands(client: Client, message: Message):
         if len(args) < 2 or not args[0].lstrip("-").isdigit() or not args[1].lstrip("-").isdigit():
             await safe_tg_call(
                 message.reply_text,
-                "ℹ️ <b>Usage:</b> <code>/transfer &lt;from_user_id&gt; &lt;to_user_id&gt;</code>",
+                f"{E_WARN} <b>Usage:</b> <code>/transfer &lt;from_user_id&gt; &lt;to_user_id&gt;</code>",
                 quote=True,
             )
             return
@@ -71,7 +76,7 @@ async def moderation_commands(client: Client, message: Message):
         count = await db.transfer_seek_scores(from_id, to_id)
         await safe_tg_call(
             message.reply_text,
-            f"✅ <b>Transferred <code>{count}</code> WordSeek score records from <code>{from_id}</code> to <code>{to_id}</code>.</b>",
+            f"{E_VERIFIED} <b>Transferred <code>{count}</code> WordSeek score records from <code>{from_id}</code> to <code>{to_id}</code>.</b>",
             quote=True,
         )
         return
@@ -89,17 +94,17 @@ async def moderation_commands(client: Client, message: Message):
     if not target_id:
         await safe_tg_call(
             message.reply_text,
-            f"ℹ️ <b>Usage:</b> Reply to a user or send <code>/{cmd} [user_id or @username]</code>",
+            f"{E_WARN} <b>Usage:</b> Reply to a user or send <code>/{cmd} [user_id or @username]</code>",
             quote=True,
         )
         return
 
     if cmd == "ban":
         await db.ban_user(target_id)
-        await safe_tg_call(message.reply_text, f"🚫 <b>Banned user <code>{target_id}</code> globally.</b>", quote=True)
+        await safe_tg_call(message.reply_text, f"{E_BAN} <b>Banned user <code>{target_id}</code> globally.</b>", quote=True)
     else:
         await db.unban_user(target_id)
-        await safe_tg_call(message.reply_text, f"✅ <b>Unbanned user <code>{target_id}</code>.</b>", quote=True)
+        await safe_tg_call(message.reply_text, f"{E_VERIFIED} <b>Unbanned user <code>{target_id}</code>.</b>", quote=True)
 
 
 @Client.on_callback_query(filters.regex(r"^admin[:_]") & filters.user(SUDO_USERS))
@@ -139,7 +144,7 @@ async def admin_callbacks(client: Client, query: CallbackQuery):
         await query.answer()
 
 
-@Client.on_message(filters.command("broadcast") & filters.user(SUDO_USERS) & filters.reply)
+@Client.on_message(bot_command("broadcast") & filters.user(SUDO_USERS) & filters.reply)
 async def broadcast_command(client: Client, message: Message):
     msg_to_broadcast = message.reply_to_message
     if not msg_to_broadcast:
@@ -152,11 +157,11 @@ async def broadcast_command(client: Client, message: Message):
     status_msg = await safe_tg_call(
         message.reply_text,
         (
-            f"📢 <b>Starting Broadcast...</b>\n\n"
+            f"{E_MEGAPHONE} <b>Starting Broadcast...</b>\n\n"
             f"<blockquote>"
-            f"👤 <b>Users:</b> <code>{len(users)}</code>\n"
-            f"👥 <b>Groups:</b> <code>{len(groups)}</code>\n"
-            f"🎯 <b>Total Targets:</b> <code>{total_targets}</code>"
+            f"{E_USER} <b>Users:</b> <code>{len(users)}</code>\n"
+            f"{E_CHAT} <b>Groups:</b> <code>{len(groups)}</code>\n"
+            f"{E_BOLT} <b>Total Targets:</b> <code>{total_targets}</code>"
             f"</blockquote>"
         ),
     )
@@ -194,11 +199,11 @@ async def broadcast_command(client: Client, message: Message):
         await asyncio.sleep(0.06)
 
     summary = (
-        "✅ <b>Broadcast Completed!</b>\n\n"
+        f"{E_VERIFIED} <b>Broadcast Completed!</b>\n\n"
         "<blockquote>"
-        f"👤 <b>Users Reached:</b> <code>{user_success}/{len(users)}</code>\n"
-        f"👥 <b>Groups Reached:</b> <code>{group_success}/{len(groups)}</code>\n"
-        f"❌ <b>Failed / Blocked:</b> <code>{failed}</code>"
+        f"{E_USER} <b>Users Reached:</b> <code>{user_success}/{len(users)}</code>\n"
+        f"{E_CHAT} <b>Groups Reached:</b> <code>{group_success}/{len(groups)}</code>\n"
+        f"{E_CROSS} <b>Failed / Blocked:</b> <code>{failed}</code>"
         "</blockquote>"
     )
     if status_msg:

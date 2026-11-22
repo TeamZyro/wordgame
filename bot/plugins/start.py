@@ -15,6 +15,7 @@ from bot.database.db import (
 )
 from bot.config import CMD_COOLDOWN, CALLBACK_COOLDOWN, SUDO_USERS
 from bot.utils.cooldown import check_cooldown, get_user_lock, safe_tg_call
+from bot.utils.command_filter import bot_command, get_primary_bot_username
 from bot.utils.rich_api import (
     send_rich_message,
     edit_rich_message,
@@ -77,7 +78,7 @@ async def edit_or_reply_view(query: CallbackQuery, text: str, markup):
     return None
 
 
-@Client.on_message(filters.command(["start"]))
+@Client.on_message(bot_command(["start"]))
 async def start_command(client: Client, message: Message):
     user = message.from_user
     if user:
@@ -87,7 +88,7 @@ async def start_command(client: Client, message: Message):
         if not allowed:
             return
 
-    uname = getattr(client.me, "username", None) or "WordGridGameBot"
+    uname = get_primary_bot_username(client, fallback="WordGridGameBot")
 
     if message.chat.type == ChatType.PRIVATE:
         if user:
@@ -108,7 +109,7 @@ async def start_command(client: Client, message: Message):
         await safe_tg_call(message.reply_text, text, reply_markup=markup)
 
 
-@Client.on_message(filters.command(["help"]))
+@Client.on_message(bot_command(["help"]))
 async def help_command(client: Client, message: Message):
     user = message.from_user
     if user:
@@ -118,7 +119,7 @@ async def help_command(client: Client, message: Message):
         if not allowed:
             return
 
-    uname = getattr(client.me, "username", None) or "WordGridGameBot"
+    uname = get_primary_bot_username(client, fallback="WordGridGameBot")
     is_admin = bool(user and user.id in SUDO_USERS and message.chat.type == ChatType.PRIVATE)
 
     rich_html = build_rich_help_html("howto")
@@ -140,7 +141,7 @@ async def help_command(client: Client, message: Message):
         await safe_tg_call(message.reply_text, text, reply_markup=markup)
 
 
-@Client.on_message(filters.command(["profile", "rank", "me"]))
+@Client.on_message(bot_command(["profile", "rank", "me"]))
 async def profile_command(client: Client, message: Message):
     user = message.from_user
     if not user or await is_user_banned(user.id):
@@ -178,7 +179,7 @@ async def navigation_callbacks(client: Client, query: CallbackQuery):
 
     async with get_user_lock(user.id):
         data = query.data.replace("help_", "help:")
-        uname = getattr(client.me, "username", None) or "WordGridGameBot"
+        uname = get_primary_bot_username(client, fallback="WordGridGameBot")
         is_private = bool(query.message and query.message.chat.type == ChatType.PRIVATE)
         is_admin = bool(user.id in SUDO_USERS and is_private)
 

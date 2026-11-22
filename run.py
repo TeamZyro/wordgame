@@ -5,6 +5,7 @@ from pyrogram.enums import ParseMode
 from bot.config import API_ID, API_HASH, BOT_TOKEN, PORT
 from bot.database.db import init_db, close_db
 from bot.utils.rich_api import close_http_session
+from bot.utils.command_filter import refresh_bot_usernames, get_primary_bot_username
 
 try:
     asyncio.get_event_loop()
@@ -71,7 +72,16 @@ class Bot(Client):
         await self._start_health_server()
         await super().start()
         me = await self.get_me()
-        logger.info("Bot started as %s (@%s) [ID: %s]", me.first_name, me.username, me.id)
+        self.me = me
+        usernames = await refresh_bot_usernames(self, me=me)
+        primary_uname = get_primary_bot_username(self)
+        logger.info(
+            "Bot started as %s (@%s) [ID: %s] | Accepted usernames: %s",
+            me.first_name,
+            primary_uname,
+            me.id,
+            ", ".join(f"@{u}" for u in sorted(usernames)) or "none",
+        )
 
     async def stop(self, *args):
         if self._health_server is not None:
