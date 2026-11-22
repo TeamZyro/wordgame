@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import time
 from pyrogram.errors import FloodWait, MessageNotModified, MessageIdInvalid
@@ -8,6 +9,25 @@ logger = logging.getLogger("WordGridBot.Cooldown")
 _cooldown_buckets: dict[str, float] = {}
 _chat_locks: dict[int, asyncio.Lock] = {}
 _user_locks: dict[int, asyncio.Lock] = {}
+_FUNC_PARAMS_CACHE: dict[object, set[str] | None] = {}
+
+
+def _get_accepted_params(func) -> set[str] | None:
+    """Returns accepted parameter names for `func`, or None if `**kwargs` is accepted."""
+    target = getattr(func, "__func__", func)
+    if target in _FUNC_PARAMS_CACHE:
+        return _FUNC_PARAMS_CACHE[target]
+    try:
+        sig = inspect.signature(func)
+        for p in sig.parameters.values():
+            if p.kind == inspect.Parameter.VAR_KEYWORD:
+                _FUNC_PARAMS_CACHE[target] = None
+                return None
+        params = set(sig.parameters.keys())
+        _FUNC_PARAMS_CACHE[target] = params
+        return params
+    except Exception:
+        return None
 
 
 def check_cooldown(key: str, cooldown_sec: float) -> tuple[bool, float]:
@@ -64,15 +84,35 @@ def get_user_lock(user_id: int) -> asyncio.Lock:
 
 async def safe_tg_call(coro_func, *args, max_wait: int = 15, **kwargs):
     """
-    Executes a Pyrogram API coroutine safely with automatic FloodWait handling
-    and silent ignoring of benign MessageNotModified errors.
+    Executes a Kurigram/Pyrogram API coroutine safely with:
+    - Automatic Kurigram 2.2.27 compatibility (strips unsupported `quote=` kwarg on
+      `reply_text`/`reply_photo`, which already reply to the target message by default)
+    - Automatic FloodWait handling
+    - Silent ignoring of benign MessageNotModified / MessageIdInvalid errors
     """
+    call_kwargs = dict(kwargs)
+    if "quote" in call_kwargs:
+        accepted = _get_accepted_params(coro_func)
+        if accepted is not None and "quote" not in accepted:
+            call_kwargs.pop("quote", None)
+
     for attempt in range(2):
         try:
-            return await coro_func(*args, **kwargs)
+            return await coro_func(*args, **call_kwargs)
         except MessageNotModified:
             return None
         except MessageIdInvalid:
+            return None
+        except TypeError as e:
+            # Fallback if a wrapper didn't expose signature and rejected `quote`
+            if "quote" in call_kwargs and "quote" in str(e):
+                call_kwargs.pop("quote", None)
+                continue
+            logger.warning(
+                "Telegram API TypeError (%s): %s",
+                getattr(coro_func, "__name__", "call"),
+                e,
+            )
             return None
         except FloodWait as e:
             wait_sec = int(getattr(e, "value", getattr(e, "x", 5)))
@@ -82,6 +122,10 @@ async def safe_tg_call(coro_func, *args, max_wait: int = 15, **kwargs):
                 continue
             return None
         except Exception as e:
-            logger.debug("Telegram API call warning (%s): %s", getattr(coro_func, "__name__", "call"), e)
+            logger.warning(
+                "Telegram API call warning (%s): %s",
+                getattr(coro_func, "__name__", "call"),
+                e,
+            )
             return None
     return None
